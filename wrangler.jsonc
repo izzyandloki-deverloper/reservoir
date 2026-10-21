@@ -1,0 +1,10 @@
+{
+  "name": "reservoir-api",
+  "main": "worker.js",
+  "compatibility_date": "REPLACE_WITH_DATE_FROM_DASHBOARD",
+  "keep_vars": true,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "REPLACE_WITH_DATABASE_NAME", "database_id": "REPLACE_WITH_DATABASE_ID" }
+  ],
+  "triggers": { "crons": ["REPLACE_WITH_CRON_FROM_DASHBOARD"] }
+}
