@@ -1,4 +1,5 @@
-// Reservoir-Worker-2026.10.22-w121
+// Reservoir-Worker-2026.10.22-w122
+globalThis.RESERVOIR_WORKER_TOP = "Reservoir-Worker-2026.10.22-w122";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking"];
 
@@ -196,7 +197,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w121";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w122";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -5140,4 +5141,5 @@ export default {
   }
 };
 
-// Reservoir-Worker-2026.10.22-w121
+globalThis.RESERVOIR_WORKER_BOTTOM = "Reservoir-Worker-2026.10.22-w122";
+// Reservoir-Worker-2026.10.22-w122
