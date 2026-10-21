@@ -1,4 +1,4 @@
-// Reservoir-Worker-2026.10.21-w118
+// Reservoir-Worker-2026.10.21-w119
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking"];
 
@@ -196,7 +196,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.21-w118";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.21-w119";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3062,13 +3062,17 @@ async function tsAutoRun(env) {
   await tsTables(env);
   await timesheetDraftsTable(env);
   const now = tsMelbourne(new Date());
-  const monday = tsAddDays(now.date, -((now.dow + 6) % 7));
-  const sunday = tsAddDays(monday, 6);
+  const thisMonday = tsAddDays(now.date, -((now.dow + 6) % 7));
+  // This week, and last week while it is still unpaid, so a Friday night run that did not go through is picked up again.
+  const lastMonday = tsAddDays(thisMonday, -7);
+  const weeks = tsAddDays(lastMonday, 10) >= now.date ? [lastMonday, thisMonday] : [thisMonday];
   const out = [];
   const people = (((await env.DB.prepare("SELECT employee_id, email, name FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE')").all()).results) || []).filter((p) => TS_AUTO_NAMES.some((re) => re.test(String(p.name || ""))));
   for (const who of people) {
     const email = String(who.email).toLowerCase();
-    const note = (m) => out.push(`${who.name}: ${m}`);
+    for (const monday of weeks) {
+    const sunday = tsAddDays(monday, 6);
+    const note = (m) => out.push(`${who.name}${monday === thisMonday ? "" : ` (week of ${monday})`}: ${m}`);
     const already = await tsDuplicate(env, who.employee_id, email, monday);
     if (already) { note(`left alone. ${already}`); continue; }
     const key = tsAppKey(monday);
@@ -3096,7 +3100,7 @@ async function tsAutoRun(env) {
       await env.DB.prepare("INSERT INTO timesheet_drafts (email, week_start, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(email, week_start) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at").bind(email, key, JSON.stringify(period), new Date().toISOString()).run();
       note("days filled in");
     }
-    const submitNow = (now.dow === 5 && now.mins >= 18 * 60) || now.dow === 6 || now.dow === 0;
+    const submitNow = monday < thisMonday || (now.dow === 5 && now.mins >= 18 * 60) || now.dow === 6 || now.dow === 0;
     if (!submitNow) continue;
     const hours = [0, 1, 2, 3, 4, 5, 6].map((i) => {
       const d = period.days[i];
@@ -3117,8 +3121,9 @@ async function tsAutoRun(env) {
     period.xeroStatus = res.xeroStatus;
     await env.DB.prepare("INSERT INTO timesheet_drafts (email, week_start, data, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(email, week_start) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at").bind(email, key, JSON.stringify(period), new Date().toISOString()).run();
     note(`submitted ${sub.total} hours to Xero as ${res.xeroStatus}${res.note ? `. ${res.note}` : ""}`);
+    }
   }
-  if (!people.length) out.push("No Tayler or Andrew found in the Xero payroll list.");
+  ["Tayler", "Andrew"].forEach((n, i) => { if (!people.some((p) => TS_AUTO_NAMES[i].test(String(p.name || "")))) out.push(`${n}: not found in the Xero payroll list with an email and an active status, so nothing is run for him.`); });
   return out;
 }
 async function tsSubmitRoutes(request, env, user, url, parts) {
@@ -5073,4 +5078,4 @@ export default {
   }
 };
 
-// Reservoir-Worker-2026.10.21-w118
+// Reservoir-Worker-2026.10.21-w119
