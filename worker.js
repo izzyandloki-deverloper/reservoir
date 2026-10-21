@@ -1,4 +1,4 @@
-// Reservoir-Worker-2026.10.21-w119
+// Reservoir-Worker-2026.10.22-w120
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking"];
 
@@ -196,7 +196,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.21-w119";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w120";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3493,11 +3493,70 @@ async function leaveRoutes(request, env, user, url) {
   }
 }
 
+// ---- Payroll sweeps. Xero is the source for payroll, so Reservoir keeps checking it and does what the Payroll screen buttons do, so nobody has to remember to tap them. They run from the half hourly cron and check the Melbourne clock themselves, so the first run in a window is the first half hour mark at or after its start time. ----
+// Tuesday from 10:00 to 14:00: looks for a posted pay run and, if one is there, stores its slips exactly as Post Pay Run does (without replacing a run already stored). Stops once a run waiting to be filed exists. If nothing is posted by 14:00, sends one notice to Tayler.
+// Thursday from 7:45: files the pay run that is waiting, exactly as File Pay Run does (marks it filed, moves its slips from Next Pay to Paid, banks the processed timesheets). If Tuesday was missed it first looks for a posted run in Xero. Only a run with a payment date of today or earlier is filed. Stops once a run paying today is filed.
+// The last thing each sweep did is kept in app_settings under sweep.payroll_last, so it can be checked.
+async function payrollSweepNote(env, day, text) {
+  try {
+    await settingsTable(env);
+    await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES ('sweep.payroll_last', ?, ?, 'Payroll sweep', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, detail = excluded.detail, by_name = excluded.by_name, at = excluded.at").bind(day, String(text).slice(0, 500)).run();
+  } catch (e) { /* the note is best effort */ }
+}
+async function payrollSweep(env) {
+  const now = tsMelbourne(new Date());
+  const tue = now.dow === 2 && now.mins >= 10 * 60 && now.mins <= 14 * 60;
+  const tueAfter = now.dow === 2 && now.mins > 14 * 60;
+  const thu = now.dow === 4 && now.mins >= 7 * 60 + 45;
+  if (!tue && !tueAfter && !thu) return;
+  await payslipTables(env);
+  const waitingRun = (from) => env.DB.prepare("SELECT r.run_id, r.payment_date FROM payslip_runs r WHERE r.filed = 0 AND r.rules >= ? AND r.payment_date >= ? AND EXISTS (SELECT 1 FROM payslip_store s WHERE s.run_id = r.run_id) ORDER BY r.payment_date DESC LIMIT 1").bind(PAYSLIP_RULES, from || "").first();
+  if (tue) {
+    if (await waitingRun(now.date)) return;
+    const pull = await payslipPull(env, { runs: 3 });
+    if (pull && pull.fail) { await payrollSweepNote(env, now.date, `Tuesday check failed: ${String(pull.fail.error || "").slice(0, 200)}`); return; }
+    const got = await waitingRun(now.date);
+    if (got) await payrollSweepNote(env, now.date, `Pay run paying ${got.payment_date} found posted in Xero and stored. Slips now show under Next Pay. Slips stored this check: ${(pull && pull.slipsStored) || 0}`);
+    else await payrollSweepNote(env, now.date, "Tuesday check: no posted pay run in Xero yet");
+    return;
+  }
+  if (tueAfter) {
+    // Past 14:00 on a Tuesday with nothing posted: one notice only.
+    if (await waitingRun(now.date)) return;
+    await settingsTable(env);
+    const sent = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'sweep.payroll_unposted'").first();
+    if (sent && sent.value === now.date) return;
+    const rows = ((await env.DB.prepare("SELECT name, email FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE')").all()).results) || [];
+    const me = rows.find((p) => /^tayler\b/i.test(String(p.name || "")));
+    const id = await notify(env, { to: me ? me.email : "@office", kind: "payroll", title: "Payroll not posted", body: "Nothing has been posted in Xero for this pay run yet. Reservoir checked until 2pm.", by: "Payroll sweep" });
+    if (id) await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES ('sweep.payroll_unposted', ?, 'notice sent', 'Payroll sweep', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, detail = excluded.detail, at = excluded.at").bind(now.date).run();
+    await payrollSweepNote(env, now.date, id ? "Tuesday 2pm: nothing posted, notice sent" : "Tuesday 2pm: nothing posted, notice failed to send");
+    return;
+  }
+  // Thursday
+  const doneToday = await env.DB.prepare("SELECT run_id FROM payslip_runs WHERE payment_date = ? AND filed = 1 AND rules >= ? LIMIT 1").bind(now.date, PAYSLIP_RULES).first();
+  if (doneToday) return;
+  let run = await waitingRun();
+  if (!run) {
+    const pull = await payslipPull(env, { runs: 3 });
+    if (pull && pull.fail) { await payrollSweepNote(env, now.date, `Thursday check failed: ${String(pull.fail.error || "").slice(0, 200)}`); return; }
+    run = await waitingRun();
+  }
+  if (!run) { await payrollSweepNote(env, now.date, "Thursday check: no posted pay run to file"); return; }
+  if (String(run.payment_date) > now.date) { await payrollSweepNote(env, now.date, `Thursday check: waiting run pays ${run.payment_date}, not filed yet`); return; }
+  await env.DB.prepare("UPDATE payslip_runs SET filed = 1, filed_at = datetime('now'), filed_by = 'Payroll sweep' WHERE run_id = ? AND filed = 0").bind(run.run_id).run();
+  // The same one pull the button makes after filing: processed timesheets are banked as permanent history. A failure here does not undo the filing.
+  let ts = "timesheets not banked";
+  try { const r = await timesheetSync(env); ts = r && r.ok ? `timesheets banked: ${r.saved || 0}` : `timesheets failed: ${String((r && r.error) || "").slice(0, 120)}`; } catch (e) { ts = `timesheets failed: ${String(e && e.message || e).slice(0, 120)}`; }
+  await payrollSweepNote(env, now.date, `Filed pay run paid ${run.payment_date}. ${ts}`);
+}
+
 export default {
   // Runs on a Cloudflare cron trigger if one is added (for example Thursday early morning). It only refreshes leave balances and leave history from Xero into D1.
   async scheduled(event, env, ctx) {
-    // Every run checks the automatic timesheets. The leave sync keeps its own schedule and is skipped on the half hourly one.
+    // Every run checks the automatic timesheets and the payroll sweeps. The leave sync keeps its own schedule and is skipped on the half hourly one.
     ctx.waitUntil(tsAutoRun(env).catch((e) => console.log("auto timesheets failed", String(e && e.message || e))));
+    ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
     if (event && event.cron === "*/30 * * * *") return;
     ctx.waitUntil(leaveSync(env).catch((e) => console.log("leave sync failed", String(e && e.message || e))));
   },
@@ -5078,4 +5137,4 @@ export default {
   }
 };
 
-// Reservoir-Worker-2026.10.21-w119
+// Reservoir-Worker-2026.10.22-w120
