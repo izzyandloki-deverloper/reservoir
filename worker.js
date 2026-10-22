@@ -1,7 +1,7 @@
-// Reservoir-Worker-2026.10.22-w123
-globalThis.w123_TOP = "Reservoir-Worker-2026.10.22-w123";
+// Reservoir-Worker-2026.10.22-w124
+globalThis.w124_TOP = "Reservoir-Worker-2026.10.22-w124";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
-const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking"];
+const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
 let jwksCache = { at: 0, keys: null };
 
@@ -64,6 +64,14 @@ const mergeById = (incoming, storedJson, known) => {
   return [...incoming, ...keep];
 };
 
+const fleetLimit = (f) => f === "financeDocs" ? 20000 : 500;
+let fleetColsDone = false;
+async function fleetCols(env) {
+  if (fleetColsDone) return;
+  for (const c of ["financeExpiry", "financeDocs"]) { try { await env.DB.prepare(`ALTER TABLE fleet ADD COLUMN ${c} TEXT`).run(); } catch (e) { /* already there */ } }
+  fleetColsDone = true;
+}
+
 const rowToItem = (r) => {
   const item = { id: r.id, group: r.grp };
   FIELDS.forEach((f) => { item[f] = r[f] ?? ""; });
@@ -72,7 +80,7 @@ const rowToItem = (r) => {
   return item;
 };
 
-const LABELS = { name: "Name", rego: "Rego", expiry: "Rego Expiry", serial: "Registration Serial Number", make: "Make", model: "Model", colour: "Colour", year: "Year", body: "Body Type", vin: "VIN", engine: "Engine Number", compliance: "Compliance Plate", fuel: "Fuel", driver: "Driver", garaged: "Garaged Address", finance: "Finance", directDebit: "Direct Debit", contract: "Contract Number", serviceProvider: "Service Provider", servicePhone: "Service Phone", serviceEmail: "Service Email", serviceBooking: "Service Booking Link" };
+const LABELS = { name: "Name", rego: "Rego", expiry: "Rego Expiry", serial: "Registration Serial Number", make: "Make", model: "Model", colour: "Colour", year: "Year", body: "Body Type", vin: "VIN", engine: "Engine Number", compliance: "Compliance Plate", fuel: "Fuel", driver: "Driver", garaged: "Garaged Address", finance: "Finance Company", directDebit: "Direct Debit", contract: "Contract Number", serviceProvider: "Service Provider", servicePhone: "Service Phone", serviceEmail: "Service Email", serviceBooking: "Service Booking Link", financeExpiry: "Finance Expiry", financeDocs: "Finance Documents" };
 
 
 // ---- SharePoint document storage through Microsoft Graph (Reservoir site, app only access) ----
@@ -197,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w123";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w124";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -4877,7 +4885,7 @@ export default {
 
     const dm = url.pathname.match(/^\/api\/fleet\/([A-Za-z0-9_-]{1,64})\/docs$/);
     if (dm && request.method === "POST") {
-      // Upload a service document into the vehicle's Service folder. T1 and T2 only.
+      // Upload a document into the vehicle's Service folder, or its Finance folder when folder=Finance. T1 and T2 only.
       if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
       const row = await env.DB.prepare("SELECT grp, rego, name FROM fleet WHERE id = ?").bind(dm[1]).first();
       if (!row) return reply(env, 404, { error: "not found", worker: WORKER_BUILD });
@@ -4888,7 +4896,7 @@ export default {
       if (!bytes.byteLength) return reply(env, 400, { error: "empty file" });
       if (bytes.byteLength > MAX_UPLOAD) return reply(env, 413, { error: "file too large" });
       try {
-        const item = await uploadToSharePoint(env, ["Fleet Management", row.grp === "Machinery" ? "Machinery" : "Vehicles", label, "Service"], fileName, bytes, request.headers.get("Content-Type"), url.searchParams.get("replace") === "1");
+        const item = await uploadToSharePoint(env, ["Fleet Management", row.grp === "Machinery" ? "Machinery" : "Vehicles", label, url.searchParams.get("folder") === "Finance" ? "Finance" : "Service"], fileName, bytes, request.headers.get("Content-Type"), url.searchParams.get("replace") === "1");
         if (user.tier === "T2") {
           try { await logUpdate(env, user, dm[1], row.rego || row.name || dm[1], "Document Uploaded", { date: new Date().toISOString().slice(0, 10), url: "", notes: item.name || fileName }); } catch (e) { /* upload already succeeded */ }
         }
@@ -5002,11 +5010,23 @@ export default {
       }
     }
 
+    if (url.pathname === "/api/fleet-addresses" && request.method === "GET") {
+      // Name and home address only, so the fleet screens can show where each driver garages the vehicle. T1 and T2.
+      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      try {
+        const rows = ((await env.DB.prepare("SELECT name, address FROM dfp_xero WHERE name IS NOT NULL AND name <> '' AND address IS NOT NULL AND address <> ''").all()).results) || [];
+        return reply(env, 200, { people: rows.map((r) => ({ name: r.name, address: r.address })) });
+      } catch (e) {
+        return reply(env, 502, { error: "could not read addresses" });
+      }
+    }
+
     const m = url.pathname.match(/^\/api\/fleet(?:\/([A-Za-z0-9_-]{1,64}))?$/);
     if (!m) return reply(env, 404, { error: "not found", worker: WORKER_BUILD });
     const id = m[1];
     const canEdit = user.tier === "T1" || user.tier === "T2";
 
+    await fleetCols(env);
     if (request.method === "GET" && !id) {
       const { results } = await env.DB.prepare("SELECT * FROM fleet ORDER BY grp, sort_order, id").all();
       return reply(env, 200, results.map(rowToItem));
@@ -5040,7 +5060,7 @@ export default {
         const grp = body.group === "Machinery" ? "Machinery" : "Vehicles";
         const sent = body.fields && typeof body.fields === "object" ? body.fields : {};
         const names = canEdit ? FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(sent, f)) : [];
-        const clean = (f) => f === "servicePhone" ? normPhone(String(sent[f] ?? "").slice(0, 500)) : String(sent[f] ?? "").slice(0, 500);
+        const clean = (f) => f === "servicePhone" ? normPhone(String(sent[f] ?? "").slice(0, 500)) : String(sent[f] ?? "").slice(0, fleetLimit(f));
         const newRepairs = JSON.stringify(applyList(existing ? existing.repairs : "[]", body.repairsUpsert, body.repairsRemove));
         if (newRepairs.length > 900000) return reply(env, 413, { error: "too large" });
         const newHistory = JSON.stringify(applyList(existing ? existing.serviceHistory : "[]", canEdit ? body.historyUpsert : [], canEdit ? body.historyRemove : []).slice(0, 500));
@@ -5101,7 +5121,7 @@ export default {
       if (history.length > 400000) return reply(env, 413, { error: "too large" });
       const changes = [];
       const grp = body.group === "Machinery" ? "Machinery" : "Vehicles";
-      const vals = FIELDS.map((f) => f === "servicePhone" ? normPhone(String(body[f] ?? "").slice(0, 500)) : String(body[f] ?? "").slice(0, 500));
+      const vals = FIELDS.map((f) => f === "servicePhone" ? normPhone(String(body[f] ?? "").slice(0, 500)) : String(body[f] ?? "").slice(0, fleetLimit(f)));
       if (existing) {
         await env.DB.prepare(`UPDATE fleet SET grp = ?, ${FIELDS.map((f) => `${f} = ?`).join(", ")}, repairs = ?, serviceHistory = ?, updated_at = datetime('now'), updated_by = ? WHERE id = ?`).bind(grp, ...vals, repairs, history, user.name, id).run();
         if (env.GRAPH_CLIENT_SECRET && existing.rego && String(body.rego || "") && String(body.rego) !== String(existing.rego)) {
@@ -5141,5 +5161,5 @@ export default {
   }
 };
 
-globalThis.w123_BOTTOM = "Reservoir-Worker-2026.10.22-w123";
-// Reservoir-Worker-2026.10.22-w123
+globalThis.w124_BOTTOM = "Reservoir-Worker-2026.10.22-w124";
+// Reservoir-Worker-2026.10.22-w124
