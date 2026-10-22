@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.22-w124
-globalThis.w124_TOP = "Reservoir-Worker-2026.10.22-w124";
+// Reservoir-Worker-2026.10.22-w125
+globalThis.w125_TOP = "Reservoir-Worker-2026.10.22-w125";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w124";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w125";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -5014,8 +5014,8 @@ export default {
       // Name and home address only, so the fleet screens can show where each driver garages the vehicle. T1 and T2.
       if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
       try {
-        const rows = ((await env.DB.prepare("SELECT name, address FROM dfp_xero WHERE name IS NOT NULL AND name <> '' AND address IS NOT NULL AND address <> ''").all()).results) || [];
-        return reply(env, 200, { people: rows.map((r) => ({ name: r.name, address: r.address })) });
+        const rows = ((await env.DB.prepare("SELECT x.name, x.address, r.preferred_name FROM dfp_xero x LEFT JOIN dfp_reservoir r ON lower(r.email) = lower(x.email) WHERE x.name IS NOT NULL AND x.name <> '' AND x.address IS NOT NULL AND x.address <> ''").all()).results) || [];
+        return reply(env, 200, { people: rows.map((r) => ({ name: r.name, address: r.address, preferredName: String(r.preferred_name || "").trim() })) });
       } catch (e) {
         return reply(env, 502, { error: "could not read addresses" });
       }
@@ -5161,5 +5161,5 @@ export default {
   }
 };
 
-globalThis.w124_BOTTOM = "Reservoir-Worker-2026.10.22-w124";
-// Reservoir-Worker-2026.10.22-w124
+globalThis.w125_BOTTOM = "Reservoir-Worker-2026.10.22-w125";
+// Reservoir-Worker-2026.10.22-w125
