@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.22-w125
-globalThis.w125_TOP = "Reservoir-Worker-2026.10.22-w125";
+// Reservoir-Worker-2026.10.22-w126
+globalThis.w126_TOP = "Reservoir-Worker-2026.10.22-w126";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w125";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w126";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2964,11 +2964,122 @@ async function noticesTable(env) {
     } catch (e) { /* no old table yet */ await migMark(env, "ts_notices_to_notices_v1", "nothing to copy"); }
   }
 }
+// Push notifications. Which kinds of notice also go to people's phones is decided here, once. Anything marked todo (someone has to act) also pushes. To change what pushes, change this list.
+const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card"];
+const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const b64uDec = (str) => { const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/"); const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4)); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
+let pushReady = false;
+async function pushTable(env) {
+  if (pushReady) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, email TEXT NOT NULL, tier TEXT, p256dh TEXT NOT NULL, auth TEXT NOT NULL, ua TEXT, created_at TEXT DEFAULT (datetime('now')), last_ok TEXT)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS push_subs_email ON push_subs (email)").run();
+  pushReady = true;
+}
+// The signing keys for push, made once and kept in app_settings. The public half goes to the app, the private half never leaves the worker.
+async function pushKeys(env) {
+  await settingsTable(env);
+  const read = async () => { const r = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'secret.push_vapid'").first(); try { return r && r.value ? JSON.parse(r.value) : null; } catch (e) { return null; } };
+  let k = await read();
+  if (!k) {
+    const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const pub = b64uEnc(await crypto.subtle.exportKey("raw", pair.publicKey));
+    const priv = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    await env.DB.prepare("INSERT OR IGNORE INTO app_settings (key, value, detail, by_name) VALUES ('secret.push_vapid', ?, 'Push notification signing keys, made by the worker', 'worker')").bind(JSON.stringify({ pub, priv })).run();
+    k = await read();
+  }
+  return k;
+}
+async function vapidHeader(env, endpoint) {
+  const k = await pushKeys(env);
+  const key = await crypto.subtle.importKey("jwk", k.priv, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const enc = (o) => b64uEnc(new TextEncoder().encode(JSON.stringify(o)));
+  const head = enc({ typ: "JWT", alg: "ES256" });
+  const body = enc({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: "mailto:maintenance@directflow.com.au" });
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(`${head}.${body}`));
+  return `vapid t=${head}.${body}.${b64uEnc(sig)}, k=${k.pub}`;
+}
+// Message encryption for web push (RFC 8291, aes128gcm). One record, no padding.
+async function pushEncrypt(p256dh, authSecret, text) {
+  const uaPub = b64uDec(p256dh), auth = b64uDec(authSecret);
+  const eph = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const asPub = new Uint8Array(await crypto.subtle.exportKey("raw", eph.publicKey));
+  const uaKey = await crypto.subtle.importKey("raw", uaPub, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, eph.privateKey, 256);
+  const hkdf = async (ikm, salt, info, bytes) => crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]), bytes * 8);
+  const ikm = new Uint8Array(await hkdf(new Uint8Array(shared), auth, concatBytes(new TextEncoder().encode("WebPush: info\0"), uaPub, asPub), 32));
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(ikm, salt, new TextEncoder().encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(ikm, salt, new TextEncoder().encode("Content-Encoding: nonce\0"), 12);
+  const aes = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const plain = concatBytes(new TextEncoder().encode(text), new Uint8Array([2]));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aes, plain));
+  return concatBytes(salt, new Uint8Array([0, 0, 16, 0]), new Uint8Array([asPub.length]), asPub, cipher);
+}
+async function pushSendOne(env, sub, payload) {
+  try {
+    const body = await pushEncrypt(sub.p256dh, sub.auth, JSON.stringify(payload));
+    const res = await fetch(sub.endpoint, { method: "POST", headers: { Authorization: await vapidHeader(env, sub.endpoint), "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", TTL: "86400", Urgency: "normal" }, body, signal: AbortSignal.timeout(8000) });
+    if (res.status === 404 || res.status === 410) { await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?").bind(sub.endpoint).run(); return "gone"; }
+    if (res.ok) { await env.DB.prepare("UPDATE push_subs SET last_ok = datetime('now') WHERE endpoint = ?").bind(sub.endpoint).run(); return "sent"; }
+    console.log("push refused", res.status, String(sub.endpoint).slice(0, 40));
+    return "refused";
+  } catch (e) { console.log("push failed", String(e && e.message || e).slice(0, 160)); return "failed"; }
+}
+// Sends one notice to the phones of whoever it was addressed to. Notices for the office go to everyone signed up at the senior levels (T1 and T2).
+async function pushForNotice(env, n, id) {
+  try {
+    if (!(PUSH_KINDS.includes(String(n.kind || "")) || n.todo)) return;
+    await pushTable(env);
+    const to = String(n.to || "").toLowerCase();
+    const rows = to === "@office"
+      ? ((await env.DB.prepare("SELECT * FROM push_subs WHERE tier IN ('T1', 'T2')").all()).results) || []
+      : ((await env.DB.prepare("SELECT * FROM push_subs WHERE email = ?").bind(to).all()).results) || [];
+    if (!rows.length) return;
+    const payload = { title: String(n.title || "Reservoir").slice(0, 120), body: "Open Reservoir to read it", tag: `n-${id || Date.now()}`, open: "notices" };
+    await Promise.allSettled(rows.map((r) => pushSendOne(env, r, payload)));
+  } catch (e) { console.log("push for notice failed", String(e && e.message || e).slice(0, 160)); }
+}
+async function pushRoutes(request, env, user, url) {
+  if (!url.pathname.startsWith("/api/push/")) return null;
+  const email = String(user.email || "").toLowerCase();
+  if (!email) return reply(env, 400, { error: "No email on your sign in" });
+  await pushTable(env);
+  if (url.pathname === "/api/push/key" && request.method === "GET") return reply(env, 200, { key: (await pushKeys(env)).pub });
+  if (url.pathname === "/api/push/status" && request.method === "GET") {
+    const ep = url.searchParams.get("endpoint") || "";
+    const row = ep ? await env.DB.prepare("SELECT email FROM push_subs WHERE endpoint = ? AND email = ?").bind(ep, email).first() : null;
+    const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_subs WHERE email = ?").bind(email).first();
+    return reply(env, 200, { subscribed: !!row, devices: n ? n.n : 0 });
+  }
+  if (request.method !== "POST") return reply(env, 405, { error: "method not allowed" });
+  if (user.viewAs) return reply(env, 403, { error: "Viewing as someone else is read only." });
+  let body = {};
+  try { body = await request.json(); } catch (e) { body = {}; }
+  if (url.pathname === "/api/push/subscribe") {
+    const s = body.subscription || {};
+    const ep = String(s.endpoint || ""), p = String(s.keys && s.keys.p256dh || ""), a = String(s.keys && s.keys.auth || "");
+    if (!/^https:\/\//.test(ep) || ep.length > 600 || !p || !a) return reply(env, 400, { error: "That subscription is not valid" });
+    await env.DB.prepare("INSERT INTO push_subs (endpoint, email, tier, p256dh, auth, ua) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET email = excluded.email, tier = excluded.tier, p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua").bind(ep, email, String(user.tier || "T3"), p, a, String(body.ua || "").slice(0, 160)).run();
+    return reply(env, 200, { ok: true });
+  }
+  if (url.pathname === "/api/push/unsubscribe") {
+    await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ? AND email = ?").bind(String(body.endpoint || ""), email).run();
+    return reply(env, 200, { ok: true });
+  }
+  if (url.pathname === "/api/push/test") {
+    const rows = ((await env.DB.prepare("SELECT * FROM push_subs WHERE email = ?").bind(email).all()).results) || [];
+    const out = await Promise.all(rows.map((r) => pushSendOne(env, r, { title: "Reservoir test", body: "Push notifications are working", tag: `t-${Date.now()}`, open: "notices" })));
+    return reply(env, 200, { sent: out.filter((x) => x === "sent").length, devices: rows.length });
+  }
+  return reply(env, 404, { error: "not found" });
+}
 async function notify(env, n) {
   try {
     await noticesTable(env);
     const id = crypto.randomUUID();
     await env.DB.prepare("INSERT INTO notices (id, to_email, kind, title, body, todo, link, data, by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, String(n.to || "").toLowerCase(), String(n.kind || "info").slice(0, 30), String(n.title || "").slice(0, 160), String(n.body || "").slice(0, 600), n.todo ? 1 : 0, n.link ? String(n.link).slice(0, 40) : null, n.data ? JSON.stringify(n.data).slice(0, 1500) : null, String(n.by || "").slice(0, 120)).run();
+    await pushForNotice(env, n, id);
     return id;
   } catch (e) { console.log("notify failed", String(e && e.message || e).slice(0, 200)); return null; }
 }
@@ -3621,6 +3732,8 @@ export default {
     if (leaveReply) return leaveReply;
     const timesheetReply = await timesheetRoutes(request, env, user, url);
     if (timesheetReply) return timesheetReply;
+    const pushReply = await pushRoutes(request, env, user, url);
+    if (pushReply) return pushReply;
     const noticesReply = await noticesRoutes(request, env, user, url);
     if (noticesReply) return noticesReply;
     // The app background everyone sees. Any tier can read which one is chosen, only a director (T1) can change it. The pictures themselves are built into the app, so only the name is stored.
@@ -5161,5 +5274,5 @@ export default {
   }
 };
 
-globalThis.w125_BOTTOM = "Reservoir-Worker-2026.10.22-w125";
-// Reservoir-Worker-2026.10.22-w125
+globalThis.w126_BOTTOM = "Reservoir-Worker-2026.10.22-w126";
+// Reservoir-Worker-2026.10.22-w126
