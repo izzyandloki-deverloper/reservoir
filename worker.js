@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.22-w126
-globalThis.w126_TOP = "Reservoir-Worker-2026.10.22-w126";
+// Reservoir-Worker-2026.10.23-w127
+globalThis.w127_TOP = "Reservoir-Worker-2026.10.23-w127";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.22-w126";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.23-w127";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -1981,12 +1981,28 @@ async function payslipListFor(env, email) {
   if (!email) return { found: false, reason: "No email on your sign in" };
   await dfpTables(env);
   await payslipTables(env);
-  const rows = ((await env.DB.prepare("SELECT s.run_id, s.period_start, s.period_end, s.payment_date, json_extract(s.slip, '$.net') AS net, COALESCE(r.filed, 1) AS filed FROM payslip_store s LEFT JOIN payslip_runs r ON r.run_id = s.run_id WHERE s.email = ? ORDER BY s.payment_date DESC").bind(email).all()).results) || [];
+  const rows = ((await env.DB.prepare("SELECT s.run_id, s.period_start, s.period_end, s.payment_date, json_extract(s.slip, '$.net') AS net, json_extract(s.slip, '$.lines') AS lines, COALESCE(r.filed, 1) AS filed FROM payslip_store s LEFT JOIN payslip_runs r ON r.run_id = s.run_id WHERE s.email = ? ORDER BY s.payment_date DESC").bind(email).all()).results) || [];
+  // Hours per financial year (1 July to 30 June, by payment date), added up from the stored slip lines. Leave and public holiday lines are counted apart from hours worked.
+  const fyMap = new Map();
+  for (const r of rows) {
+    let lines = [];
+    try { lines = JSON.parse(r.lines || "[]") || []; } catch (e) { lines = []; }
+    const fy = financialYear(String(r.payment_date));
+    const row = fyMap.get(fy.label) || { label: `${fy.label}/${Number(fy.label) + 1}`, worked: 0, leave: 0, runs: 0 };
+    for (const l of lines) {
+      const h = Number(l.hours) || 0;
+      if (!h) continue;
+      if (/leave|holiday|sick|carer|personal|bereave|compassion|jury|long service/i.test(String(l.label || ""))) row.leave += h; else row.worked += h;
+    }
+    row.runs++;
+    fyMap.set(fy.label, row);
+  }
+  const fyHours = [...fyMap.values()].map((x) => ({ label: x.label, worked: money2(x.worked), leave: money2(x.leave), runs: x.runs })).sort((a, b) => b.label.localeCompare(a.label));
   if (!rows.length) {
     const known = await env.DB.prepare("SELECT employee_id FROM xero_payroll WHERE email = ?").bind(email).first();
     if (!known) return { found: false, reason: NOT_IN_RESERVOIR };
   }
-  return { found: true, slips: rows.map((r) => ({ id: r.run_id, start: r.period_start, end: r.period_end, paid: r.payment_date, net: typeof r.net === "number" ? r.net : null, filed: r.filed !== 0 })), partial: false };
+  return { found: true, slips: rows.map((r) => ({ id: r.run_id, start: r.period_start, end: r.period_end, paid: r.payment_date, net: typeof r.net === "number" ? r.net : null, filed: r.filed !== 0 })), partial: false, fyHours };
 }
 // One stored pay slip for a person, with year to date added up from their stored slips and their own bank details and job title from dfp_xero. Null when there is none.
 async function payslipOneFor(env, email, runId) {
@@ -5274,5 +5290,5 @@ export default {
   }
 };
 
-globalThis.w126_BOTTOM = "Reservoir-Worker-2026.10.22-w126";
-// Reservoir-Worker-2026.10.22-w126
+globalThis.w127_BOTTOM = "Reservoir-Worker-2026.10.23-w127";
+// Reservoir-Worker-2026.10.23-w127
