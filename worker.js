@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w138
-globalThis.w138_TOP = "Reservoir-Worker-2026.10.24-w138";
+// Reservoir-Worker-2026.10.24-w139
+globalThis.w139_TOP = "Reservoir-Worker-2026.10.24-w139";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w138";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w139";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2950,7 +2950,7 @@ async function tsPushXero(env, sub) {
 async function tsSalaryHours(env, email) {
   try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
 }
-// Weeks that were kept in Reservoir only because the person is salaried (before w138) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+// Weeks that were kept in Reservoir only because the person is salaried (before w139) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
 async function tsResendSalaried(env) {
   await tsTables(env);
   const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
@@ -2978,6 +2978,67 @@ async function tsDuplicate(env, employeeId, email, week) {
 // One table for everything that needs to tell somebody something. A notice goes to one person (their work email) or to the whole office ('@office', seen by every director and manager). A notice with todo = 1 is a job for the person: it stays on their punch list, and keeps counting on the bell, until it is done. Any other notice counts until it has been read.
 // data holds what the app needs to act on the notice, for example which card and which photo.
 let noticesReady = false;
+// ---- General requests (fuel card, replacement tools, test and tag, and the rest). The app keeps each request as one JSON record. Anyone signed in can send one and see their own. The office (T1 and T2) sees them all, and only Tayler can approve or decline.
+let appRequestsReady = false;
+async function appRequestsTable(env) {
+  if (appRequestsReady) return;
+  appRequestsReady = true;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS app_requests (id TEXT PRIMARY KEY, by_email TEXT NOT NULL, by_name TEXT, type TEXT, status TEXT, data TEXT NOT NULL, created_at TEXT, updated_at TEXT)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS app_requests_by ON app_requests (by_email)").run();
+}
+async function appRequestsRoutes(request, env, user, url) {
+  const m = url.pathname.match(/^\/api\/requests(?:\/([A-Za-z0-9_-]{1,64}))?$/);
+  if (!m) return null;
+  const email = String(user.email || "").trim().toLowerCase();
+  if (!email) return reply(env, 400, { error: "No email on your sign in" });
+  const office = user.tier === "T1" || user.tier === "T2";
+  await appRequestsTable(env);
+  const out = (r) => { try { return { ...JSON.parse(r.data), id: r.id, server: true }; } catch (e) { return null; } };
+  if (request.method === "GET" && !m[1]) {
+    const rows = office
+      ? ((await env.DB.prepare("SELECT * FROM app_requests ORDER BY created_at DESC LIMIT 300").all()).results) || []
+      : ((await env.DB.prepare("SELECT * FROM app_requests WHERE by_email = ? ORDER BY created_at DESC LIMIT 300").bind(email).all()).results) || [];
+    return reply(env, 200, { requests: rows.map(out).filter(Boolean), worker: WORKER_BUILD });
+  }
+  if (request.method === "POST" && !m[1]) {
+    let b;
+    try { b = await request.json(); } catch (e) { b = null; }
+    if (!b || typeof b !== "object" || !/^[A-Za-z0-9_-]{1,64}$/.test(String(b.id || ""))) return reply(env, 400, { error: "Bad request record" });
+    const rec = { ...b };
+    delete rec.server;
+    rec.photos = (Array.isArray(rec.photos) ? rec.photos : []).slice(0, 8).map((x) => ({ name: String(x && x.name || "Photo").slice(0, 120), thumb: x && typeof x.thumb === "string" && x.thumb.length < 120000 ? x.thumb : "" }));
+    rec.kind = "request";
+    const json = JSON.stringify(rec);
+    if (json.length > 900000) return reply(env, 413, { error: "That request is too large" });
+    const existing = await env.DB.prepare("SELECT * FROM app_requests WHERE id = ?").bind(rec.id).first();
+    const now = new Date().toISOString();
+    if (!existing) {
+      const first = String(user.name || "").split(" ")[0];
+      rec.by = first || rec.by;
+      await env.DB.prepare("INSERT INTO app_requests (id, by_email, by_name, type, status, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(rec.id, email, user.name || "", String(rec.type || ""), String(rec.status || "pending"), JSON.stringify(rec), now, now).run();
+      await notify(env, { to: "@office", kind: "request", title: `New request, ${String(rec.type || "Request").slice(0, 60)}`, body: `${first || "Someone"} sent a request. Open Team Requests.`, link: "teamrequests", by: user.name || email });
+      return reply(env, 200, { ok: true, created: true });
+    }
+    if (existing.by_email !== email && !office) return reply(env, 403, { error: "forbidden" });
+    const oldStatus = String(existing.status || "pending");
+    const newStatus = String(rec.status || oldStatus);
+    if (newStatus !== oldStatus && (newStatus === "approved" || newStatus === "declined") && !isApprover(user)) return reply(env, 403, { error: "Only Tayler can approve or decline requests for now" });
+    rec.by = (() => { try { return JSON.parse(existing.data).by || rec.by; } catch (e) { return rec.by; } })();
+    await env.DB.prepare("UPDATE app_requests SET status = ?, type = ?, data = ?, updated_at = ? WHERE id = ?").bind(newStatus, String(rec.type || existing.type || ""), JSON.stringify(rec), now, rec.id).run();
+    if (newStatus !== oldStatus && (newStatus === "approved" || newStatus === "declined")) {
+      await notify(env, { to: existing.by_email, kind: "request", title: `Request ${newStatus}, ${String(rec.type || "Request").slice(0, 60)}`, body: `Your request was ${newStatus}.`, link: "makerequest", by: user.name || email });
+    }
+    return reply(env, 200, { ok: true });
+  }
+  if (request.method === "DELETE" && m[1]) {
+    const row = await env.DB.prepare("SELECT by_email FROM app_requests WHERE id = ?").bind(m[1]).first();
+    if (!row) return reply(env, 200, { ok: true });
+    if (row.by_email !== email && !isApprover(user)) return reply(env, 403, { error: "forbidden" });
+    await env.DB.prepare("DELETE FROM app_requests WHERE id = ?").bind(m[1]).run();
+    return reply(env, 200, { ok: true });
+  }
+  return reply(env, 405, { error: "method not allowed" });
+}
 async function noticesTable(env) {
   if (noticesReady) return;
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, to_email TEXT NOT NULL, kind TEXT, title TEXT, body TEXT, todo INTEGER NOT NULL DEFAULT 0, link TEXT, data TEXT, by_name TEXT, created_at TEXT DEFAULT (datetime('now')), read_at TEXT, done_at TEXT, done_by TEXT)").run();
@@ -2993,7 +3054,7 @@ async function noticesTable(env) {
   }
 }
 // Push notifications. Which kinds of notice also go to people's phones is decided here, once. Anything marked todo (someone has to act) also pushes. To change what pushes, change this list.
-const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card"];
+const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request"];
 const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
 const b64uDec = (str) => { const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/"); const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4)); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
@@ -3809,6 +3870,8 @@ export default {
     if (timesheetReply) return timesheetReply;
     const pushReply = await pushRoutes(request, env, user, url);
     if (pushReply) return pushReply;
+    const reqsReply = await appRequestsRoutes(request, env, user, url);
+    if (reqsReply) return reqsReply;
     const noticesReply = await noticesRoutes(request, env, user, url);
     if (noticesReply) return noticesReply;
     // The app background everyone sees. Any tier can read which one is chosen, only a director (T1) can change it. The pictures themselves are built into the app, so only the name is stored.
@@ -5363,5 +5426,5 @@ export default {
   }
 };
 
-globalThis.w138_BOTTOM = "Reservoir-Worker-2026.10.24-w138";
-// Reservoir-Worker-2026.10.24-w138
+globalThis.w139_BOTTOM = "Reservoir-Worker-2026.10.24-w139";
+// Reservoir-Worker-2026.10.24-w139
