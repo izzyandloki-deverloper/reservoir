@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w149
-globalThis.w149_TOP = "Reservoir-Worker-2026.10.25-w149";
+// Reservoir-Worker-2026.10.25-w150
+globalThis.w150_TOP = "Reservoir-Worker-2026.10.25-w150";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w149";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w150";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3389,6 +3389,7 @@ async function tsOfficeRoute(env, user) {
 // Anyone who has already done their week by hand, or whose week is already in Xero, is left alone. Keep this holiday list in step with VIC_HOLIDAYS_COMMON_2026 in the app.
 const TS_AUTO_NAMES = [/^tayler\b/i, /^andrew\b/i];
 const TS_HOLIDAYS = {
+  "2025-09-26": "Friday before the AFL Grand Final", "2025-10-22": "Geelong Cup", "2025-12-25": "Christmas Day", "2025-12-26": "Boxing Day",
   "2026-01-01": "New Year's Day", "2026-01-26": "Australia Day", "2026-03-09": "Labour Day", "2026-04-03": "Good Friday", "2026-04-04": "Easter Saturday", "2026-04-05": "Easter Sunday", "2026-04-06": "Easter Monday",
   "2026-04-25": "ANZAC Day", "2026-06-08": "King's Birthday", "2026-09-25": "Grand Final Friday", "2026-10-21": "Geelong Cup", "2026-12-25": "Christmas Day", "2026-12-26": "Boxing Day", "2026-12-28": "Additional day (Boxing Day falls on a Saturday)"
 };
@@ -5573,5 +5574,5 @@ export default {
   }
 };
 
-globalThis.w149_BOTTOM = "Reservoir-Worker-2026.10.25-w149";
-// Reservoir-Worker-2026.10.25-w149
+globalThis.w150_BOTTOM = "Reservoir-Worker-2026.10.25-w150";
+// Reservoir-Worker-2026.10.25-w150
