@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w141
-globalThis.w141_TOP = "Reservoir-Worker-2026.10.24-w141";
+// Reservoir-Worker-2026.10.24-w142
+globalThis.w142_TOP = "Reservoir-Worker-2026.10.24-w142";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w141";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w142";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -1795,17 +1795,20 @@ function financialYear(iso) {
 // ---- PPE: the bag acknowledgement, replenishment orders and the four stage trail (requested, approved, provided, received) ----
 // Everything is kept in DFP's own database and nothing here touches Xero. Items are fixed on the Worker so a request can only name a real item.
 // "stock" items are supplied by DFP from the shed. "buy" items are bought by the person after approval, with the receipt uploaded against the order to close it.
+const PPE_BOOT_SIZES = ["AU 9", "AU 10", "AU 11", "AU 12", "AU 13"];
 const PPE_ITEMS = [
-  { id: "glasses", label: "Safety glasses, UV and clear", kind: "stock" },
-  { id: "earplugs", label: "Ear plugs", kind: "stock" },
-  { id: "earmuffs", label: "Ear muffs", kind: "stock" },
-  { id: "silicone", label: "Silicone gloves", kind: "stock", sizes: ["S", "M", "L", "XL"] },
-  { id: "sunscreen", label: "Sunscreen", kind: "stock" },
-  { id: "hardhat", label: "Hard hat", kind: "stock" },
-  { id: "masks", label: "Face masks", kind: "stock" },
-  { id: "respirator", label: "Respirator and filters", kind: "stock" },
-  { id: "firstaid", label: "Car first aid kit", kind: "stock", expiry: true },
-  { id: "cutgloves", label: "Cut resistant gloves", kind: "buy" }
+  { id: "earmuffs", label: "Ear Muffs", kind: "stock" },
+  { id: "earplugs", label: "Ear Plugs", kind: "stock" },
+  { id: "masks", label: "Face Masks", kind: "stock" },
+  { id: "firstaid", label: "First Aid Kit", kind: "stock", expiry: true },
+  { id: "cutgloves", label: "Gloves: Cut Resistant", kind: "stock", sizes: ["S", "M", "L", "XL"] },
+  { id: "silicone", label: "Gloves: Silicone", kind: "stock", sizes: ["S", "M", "L", "XL"] },
+  { id: "hardhat", label: "Hard Hat", kind: "stock" },
+  { id: "respirator", label: "Respirator: P2", kind: "stock" },
+  { id: "glassesclear", label: "Safety Glasses: Clear", kind: "stock" },
+  { id: "glassesuv", label: "Safety Glasses: UV", kind: "stock" },
+  { id: "steelcap", label: "Steel Cap Boots", kind: "stock", sizes: PPE_BOOT_SIZES },
+  { id: "sunscreen", label: "Sunscreen", kind: "stock" }
 ];
 const ppeItem = (id) => PPE_ITEMS.find((x) => x.id === id);
 let ppeReady = false;
@@ -2950,7 +2953,7 @@ async function tsPushXero(env, sub) {
 async function tsSalaryHours(env, email) {
   try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
 }
-// Weeks that were kept in Reservoir only because the person is salaried (before w141) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+// Weeks that were kept in Reservoir only because the person is salaried (before w142) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
 async function tsResendSalaried(env) {
   await tsTables(env);
   const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
@@ -3053,9 +3056,9 @@ async function noticesTable(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, to_email TEXT NOT NULL, kind TEXT, title TEXT, body TEXT, todo INTEGER NOT NULL DEFAULT 0, link TEXT, data TEXT, by_name TEXT, created_at TEXT DEFAULT (datetime('now')), read_at TEXT, done_at TEXT, done_by TEXT)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS notices_to ON notices (to_email, created_at)").run();
   noticesReady = true;
-  // One time: every notice is cleared so everyone starts fresh (w141).
-  if (!(await migDone(env, "notices_fresh_start_w141"))) {
-    try { await env.DB.prepare("DELETE FROM notices").run(); await migMark(env, "notices_fresh_start_w141", "all notices cleared"); } catch (e) { noticesReady = false; throw e; }
+  // One time: every notice is cleared so everyone starts fresh (w142).
+  if (!(await migDone(env, "notices_fresh_start_w142"))) {
+    try { await env.DB.prepare("DELETE FROM notices").run(); await migMark(env, "notices_fresh_start_w142", "all notices cleared"); } catch (e) { noticesReady = false; throw e; }
   }
   // One time: the timesheet notices that were kept on their own are brought across.
   if (!(await migDone(env, "ts_notices_to_notices_v1"))) {
@@ -4891,7 +4894,7 @@ export default {
       try { body = await request.json(); } catch { return reply(env, 400, { error: "bad json" }); }
       const items = ppeCleanItems(body.items);
       if (!items) return reply(env, 400, { error: "Those items are not valid" });
-      if (items.some((x) => x.id === "silicone" && !x.size)) return reply(env, 400, { error: "Choose a size for the silicone gloves" });
+      if (items.some((x) => { const it = ppeItem(x.id); return it && it.sizes && !x.size; })) return reply(env, 400, { error: "Choose a size" });
       try {
         await ppeTables(env);
         const who = ppePerson(user);
@@ -5439,5 +5442,5 @@ export default {
   }
 };
 
-globalThis.w141_BOTTOM = "Reservoir-Worker-2026.10.24-w141";
-// Reservoir-Worker-2026.10.24-w141
+globalThis.w142_BOTTOM = "Reservoir-Worker-2026.10.24-w142";
+// Reservoir-Worker-2026.10.24-w142
