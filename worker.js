@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.23-w127
-globalThis.w127_TOP = "Reservoir-Worker-2026.10.23-w127";
+// Reservoir-Worker-2026.10.24-w128
+globalThis.w128_TOP = "Reservoir-Worker-2026.10.24-w128";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.23-w127";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w128";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -5089,7 +5089,7 @@ export default {
     // The receipt history. Every receipt sent from Reservoir is kept here, so it is still there after the app is closed and the office can see reimbursements from other phones. The files themselves are in SharePoint. The office (T1) sees every receipt, T2 sees their own. Only T1 marks a reimbursement paid or declined.
     const rrm = url.pathname.match(/^\/api\/receipt-records(?:\/([A-Za-z0-9_-]{1,64})\/status)?$/);
     if (rrm) {
-      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      // Anyone signed in can send a reimbursement and see their own. Only T1 and T2 handle company receipts, and only T1 processes a reimbursement.
       await receiptRecordsTable(env);
       const first = String(user.name || "").split(" ")[0];
       const mail = String(user.email || "").toLowerCase();
@@ -5106,6 +5106,7 @@ export default {
         const id = String(body.id || "");
         if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return reply(env, 400, { error: "bad id" });
         const type = body.receiptType === "reimbursement" ? "reimbursement" : "company";
+        if (type === "company" && user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
         const status = ["sent", "submitted"].includes(body.status) ? body.status : (type === "company" ? "sent" : "submitted");
         const view = typeof body.view === "string" && body.view.startsWith("data:image/") && body.view.length < 400000 ? body.view : "";
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? body.date : today;
@@ -5124,10 +5125,10 @@ export default {
     }
 
     if (url.pathname === "/api/receipts" && request.method === "POST") {
-      // Upload a receipt photo or PDF. T1 and T2.
-      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      // Upload a receipt photo or PDF. Anyone signed in can upload a reimbursement. Company receipts are T1 and T2.
       const fileName = cleanName(url.searchParams.get("name")) || "receipt.pdf";
       const kind = url.searchParams.get("kind") === "reimbursement" ? "Reimbursements" : "Company";
+      if (kind === "Company" && user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
       const bytes = await request.arrayBuffer();
       if (!bytes.byteLength) return reply(env, 400, { error: "empty file" });
       if (bytes.byteLength > MAX_UPLOAD) return reply(env, 413, { error: "file too large" });
@@ -5290,5 +5291,5 @@ export default {
   }
 };
 
-globalThis.w127_BOTTOM = "Reservoir-Worker-2026.10.23-w127";
-// Reservoir-Worker-2026.10.23-w127
+globalThis.w128_BOTTOM = "Reservoir-Worker-2026.10.24-w128";
+// Reservoir-Worker-2026.10.24-w128
