@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w148
-globalThis.w148_TOP = "Reservoir-Worker-2026.10.25-w148";
+// Reservoir-Worker-2026.10.25-w149
+globalThis.w149_TOP = "Reservoir-Worker-2026.10.25-w149";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w148";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w149";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2004,26 +2004,25 @@ async function payslipListFor(env, email) {
     row.runs++;
     fyMap.set(fy.label, row);
   }
-  // Financial year stats from 2025/2026 on: pay totals, hours, and paid days off by kind. Only pays that have been filed count. Days come from leave hours divided by the person's contracted hours in a day.
+  // Financial year stats from 2025/2026 on: pay totals, hours worked, and days off. Pay and hours come from the filed payslips. Days off come from the same approved leave records the Leave screen lists (split pieces left out, as there), counted day by day inside the year, so the two screens always agree. Days after today are Booked Ahead, not taken.
+  let fyStats = [];
+  try {
+  await leaveTable(env);
   const dayLen = await leaveDayHours(env, email);
   const todayIso = new Date().toISOString().slice(0, 10);
+  const leaveRows = ((await env.DB.prepare("SELECT * FROM xero_leave WHERE email = ? AND status = 'approved' AND split_of IS NULL").bind(email).all()).results) || [];
   const stat = new Map();
   for (const r of rows) {
     if (r.filed === 0) continue;
     const fy = financialYear(String(r.payment_date));
     if (Number(fy.label) < 2025) continue;
-    const o = stat.get(fy.label) || { fy: fy.label, label: `${fy.label}/${Number(fy.label) + 1}`, closed: `${Number(fy.label) + 1}-06-30` < todayIso, runs: 0, firstPaid: String(r.payment_date), lastPaid: String(r.payment_date), gross: 0, tax: 0, super: 0, net: 0, worked: 0, annual: 0, personal: 0, holiday: 0, other: 0 };
+    const o = stat.get(fy.label) || { fy: fy.label, label: `${fy.label}/${Number(fy.label) + 1}`, closed: `${Number(fy.label) + 1}-06-30` < todayIso, runs: 0, firstPaid: String(r.payment_date), lastPaid: String(r.payment_date), gross: 0, tax: 0, super: 0, net: 0, worked: 0 };
     let lines = [];
     try { lines = JSON.parse(r.lines || "[]") || []; } catch (e) { lines = []; }
     for (const l of lines) {
       const h = Number(l.hours) || 0;
       if (!h) continue;
-      const lab = String(l.label || "");
-      if (/holiday/i.test(lab)) o.holiday += h;
-      else if (/annual/i.test(lab)) o.annual += h;
-      else if (/sick|carer|personal/i.test(lab)) o.personal += h;
-      else if (/leave|bereave|compassion|jury|long service/i.test(lab)) o.other += h;
-      else o.worked += h;
+      if (!/leave|holiday|sick|carer|personal|bereave|compassion|jury|long service/i.test(String(l.label || ""))) o.worked += h;
     }
     o.runs++;
     o.gross += Number(r.g) || 0; o.tax += Number(r.t) || 0; o.super += Number(r.sp) || 0; o.net += Number(r.nn) || 0;
@@ -2031,8 +2030,26 @@ async function payslipListFor(env, email) {
     if (String(r.payment_date) > o.lastPaid) o.lastPaid = String(r.payment_date);
     stat.set(fy.label, o);
   }
-  const days = (h) => Math.round((h / dayLen) * 10) / 10;
-  const fyStats = [...stat.values()].map((o) => ({ fy: o.fy, label: o.label, closed: o.closed, runs: o.runs, firstPaid: o.firstPaid, lastPaid: o.lastPaid, gross: money2(o.gross), tax: money2(o.tax), super: money2(o.super), net: money2(o.net), worked: money2(o.worked), annualHours: money2(o.annual), personalHours: money2(o.personal), holidayHours: money2(o.holiday), otherHours: money2(o.other), annualDays: days(o.annual), personalDays: days(o.personal), holidayDays: days(o.holiday), otherDays: days(o.other), dayHours: dayLen })).sort((a, b) => b.fy.localeCompare(a.fy));
+  const r1 = (n) => Math.round(n * 10) / 10;
+  fyStats = [...stat.values()].map((o) => {
+    const from = `${o.fy}-07-01`, to = `${Number(o.fy) + 1}-06-30`;
+    const kinds = new Map();
+    let hoursTaken = 0, booked = 0;
+    for (const lr of leaveRows) {
+      if (lr.to_date < from || lr.from_date > to) continue;
+      const label = lr.type === "other" ? (lr.type_name || "Other Leave") : (LEAVE_LABELS[lr.type] || lr.type_name || "Leave");
+      for (const d of leavePlanOf(lr, dayLen)) {
+        if (d.date < from || d.date > to || !(d.hours > 0)) continue;
+        const frac = Math.min(1, d.hours / dayLen);
+        if (d.date > todayIso) { booked += frac; continue; }
+        const k = kinds.get(label) || { label, days: 0, hours: 0 };
+        k.days += frac; k.hours += d.hours; hoursTaken += d.hours;
+        kinds.set(label, k);
+      }
+    }
+    return { fy: o.fy, label: o.label, closed: o.closed, runs: o.runs, firstPaid: o.firstPaid, lastPaid: o.lastPaid, gross: money2(o.gross), tax: money2(o.tax), super: money2(o.super), net: money2(o.net), worked: money2(o.worked), leave: [...kinds.values()].map((k) => ({ label: k.label, days: r1(k.days), hours: money2(k.hours) })).sort((a, b) => a.label.localeCompare(b.label)), leaveHours: money2(hoursTaken), bookedDays: r1(booked), dayHours: dayLen };
+  }).sort((a, b) => b.fy.localeCompare(a.fy));
+  } catch (e) { console.log("fy stats error", String(e && e.message || e).slice(0, 200)); fyStats = []; }
   const fyHours = [...fyMap.values()].map((x) => ({ label: x.label, worked: money2(x.worked), leave: money2(x.leave), runs: x.runs })).sort((a, b) => b.label.localeCompare(a.label));
   if (!rows.length) {
     const known = await env.DB.prepare("SELECT employee_id FROM xero_payroll WHERE email = ?").bind(email).first();
@@ -5556,5 +5573,5 @@ export default {
   }
 };
 
-globalThis.w148_BOTTOM = "Reservoir-Worker-2026.10.25-w148";
-// Reservoir-Worker-2026.10.25-w148
+globalThis.w149_BOTTOM = "Reservoir-Worker-2026.10.25-w149";
+// Reservoir-Worker-2026.10.25-w149
