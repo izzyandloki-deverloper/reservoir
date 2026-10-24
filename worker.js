@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w137
-globalThis.w137_TOP = "Reservoir-Worker-2026.10.24-w137";
+// Reservoir-Worker-2026.10.24-w138
+globalThis.w138_TOP = "Reservoir-Worker-2026.10.24-w138";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w137";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w138";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2950,7 +2950,7 @@ async function tsPushXero(env, sub) {
 async function tsSalaryHours(env, email) {
   try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
 }
-// Weeks that were kept in Reservoir only because the person is salaried (before w137) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+// Weeks that were kept in Reservoir only because the person is salaried (before w138) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
 async function tsResendSalaried(env) {
   await tsTables(env);
   const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
@@ -3509,25 +3509,6 @@ async function leaveRoutes(request, env, user, url) {
       if (have.found && !have.hasLeave) return reply(env, 403, { error: "You have no leave set up in Xero, so there is nothing to request" });
       const pay = await env.DB.prepare("SELECT employee_id FROM xero_payroll WHERE email = ?").bind(email).first();
       const id = await leaveCreate(env, { email, name: user.name || "", employeeId: pay ? pay.employee_id : null, type, from: b.from, to: b.to });
-      return reply(env, 200, { ok: true, id });
-    }
-    if (parts.length === 3 && parts[2] === "people" && method === "GET") {
-      if (!office) return reply(env, 403, { error: "forbidden" });
-      const rows = ((await env.DB.prepare("SELECT email, name FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE') ORDER BY name").all()).results) || [];
-      return reply(env, 200, { people: rows.map((r) => ({ email: String(r.email).toLowerCase(), name: r.name || r.email })), worker: WORKER_BUILD });
-    }
-    if (parts.length === 3 && parts[2] === "office-request" && method === "POST") {
-      if (!office) return reply(env, 403, { error: "forbidden" });
-      const b = await body();
-      const who = String(b.email || "").trim().toLowerCase();
-      const type = leaveTypeOf(b.type);
-      if (!who || !type) return reply(env, 400, { error: "Choose a person and a leave type" });
-      if (!leaveIsoOk(b.from) || !leaveIsoOk(b.to) || b.to < b.from) return reply(env, 400, { error: "Check the dates" });
-      const pay = await env.DB.prepare("SELECT employee_id, name FROM xero_payroll WHERE lower(email) = ?").bind(who).first();
-      if (!pay) return reply(env, 404, { error: "That person is not in the Xero payroll list" });
-      const clash = await env.DB.prepare("SELECT id FROM xero_leave WHERE email = ? AND status IN ('pending', 'approved') AND from_date <= ? AND to_date >= ?").bind(who, b.to, b.from).first();
-      if (clash) return reply(env, 409, { error: "They already have leave over some of those dates" });
-      const id = await leaveCreate(env, { email: who, name: pay.name || who, employeeId: pay.employee_id, type, from: b.from, to: b.to });
       return reply(env, 200, { ok: true, id });
     }
     if (parts.length === 4 && parts[2] !== "me" && parts[3] === "edit" && method === "POST") {
@@ -5382,5 +5363,5 @@ export default {
   }
 };
 
-globalThis.w137_BOTTOM = "Reservoir-Worker-2026.10.24-w137";
-// Reservoir-Worker-2026.10.24-w137
+globalThis.w138_BOTTOM = "Reservoir-Worker-2026.10.24-w138";
+// Reservoir-Worker-2026.10.24-w138
