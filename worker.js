@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w139
-globalThis.w139_TOP = "Reservoir-Worker-2026.10.24-w139";
+// Reservoir-Worker-2026.10.24-w140
+globalThis.w140_TOP = "Reservoir-Worker-2026.10.24-w140";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w139";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w140";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2950,7 +2950,7 @@ async function tsPushXero(env, sub) {
 async function tsSalaryHours(env, email) {
   try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
 }
-// Weeks that were kept in Reservoir only because the person is salaried (before w139) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+// Weeks that were kept in Reservoir only because the person is salaried (before w140) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
 async function tsResendSalaried(env) {
   await tsTables(env);
   const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
@@ -3026,8 +3026,18 @@ async function appRequestsRoutes(request, env, user, url) {
     rec.by = (() => { try { return JSON.parse(existing.data).by || rec.by; } catch (e) { return rec.by; } })();
     await env.DB.prepare("UPDATE app_requests SET status = ?, type = ?, data = ?, updated_at = ? WHERE id = ?").bind(newStatus, String(rec.type || existing.type || ""), JSON.stringify(rec), now, rec.id).run();
     if (newStatus !== oldStatus && (newStatus === "approved" || newStatus === "declined")) {
-      await notify(env, { to: existing.by_email, kind: "request", title: `Request ${newStatus}, ${String(rec.type || "Request").slice(0, 60)}`, body: `Your request was ${newStatus}.`, link: "makerequest", by: user.name || email });
+      await notify(env, { to: existing.by_email, kind: "request", title: `Your request for ${String(rec.type || "request").toLowerCase().slice(0, 60)} has been ${newStatus}`, body: "Check your request screen for more details.", link: "makerequest", by: user.name || email });
     }
+    // A note from the office sends the requester back a push, and a reply from the requester tells the office.
+    try {
+      const before = (() => { try { return (JSON.parse(existing.data).notes || []).length; } catch (e) { return 0; } })();
+      const notes = Array.isArray(rec.notes) ? rec.notes : [];
+      const last = notes[notes.length - 1];
+      if (notes.length > before && last && newStatus === "pending") {
+        if (last.role === "office") await notify(env, { to: existing.by_email, kind: "request", title: `More information needed for your ${String(rec.type || "request").toLowerCase().slice(0, 60)} request`, body: "Check your request screen for more details.", link: "makerequest", by: user.name || email });
+        else await notify(env, { to: "@office", kind: "request", title: `Reply on request, ${String(rec.type || "Request").slice(0, 60)}`, body: "The requester replied. Open Team Requests.", link: "teamrequests", by: user.name || email });
+      }
+    } catch (e) { /* the notice is best effort */ }
     return reply(env, 200, { ok: true });
   }
   if (request.method === "DELETE" && m[1]) {
@@ -3151,7 +3161,7 @@ async function pushForNotice(env, n, id) {
       ? ((await env.DB.prepare("SELECT * FROM push_subs WHERE tier IN ('T1', 'T2')").all()).results) || []
       : ((await env.DB.prepare("SELECT * FROM push_subs WHERE email = ?").bind(to).all()).results) || [];
     if (!rows.length) return;
-    const payload = { title: String(n.title || "Reservoir").slice(0, 120), body: "Open Reservoir to read it", tag: `n-${id || Date.now()}`, open: /^[a-z]+$/.test(String(n.link || "")) ? String(n.link) : "notices" };
+    const payload = { title: String(n.title || "Reservoir").slice(0, 120), body: n.kind === "request" ? String(n.body || "Open Reservoir to read it").slice(0, 160) : "Open Reservoir to read it", tag: `n-${id || Date.now()}`, open: /^[a-z]+$/.test(String(n.link || "")) ? String(n.link) : "notices" };
     await Promise.allSettled(rows.map(async (r) => {
       if (pushInHours(pushModeOf(r))) return pushSendOne(env, r, payload);
       await env.DB.prepare("INSERT INTO push_held (endpoint) VALUES (?)").bind(r.endpoint).run();
@@ -5426,5 +5436,5 @@ export default {
   }
 };
 
-globalThis.w139_BOTTOM = "Reservoir-Worker-2026.10.24-w139";
-// Reservoir-Worker-2026.10.24-w139
+globalThis.w140_BOTTOM = "Reservoir-Worker-2026.10.24-w140";
+// Reservoir-Worker-2026.10.24-w140
