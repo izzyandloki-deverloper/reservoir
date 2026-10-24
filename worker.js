@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w134
-globalThis.w134_TOP = "Reservoir-Worker-2026.10.24-w134";
+// Reservoir-Worker-2026.10.24-w135
+globalThis.w135_TOP = "Reservoir-Worker-2026.10.24-w135";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w134";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w135";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2897,9 +2897,7 @@ async function tsPushXero(env, sub) {
   const picked = xeroPickRates(record, items.EarningsRates || []);
   const days = JSON.parse(sub.days);
   if (!picked.ordinaryItem) return { fail: "Xero has no ordinary earnings rate for this person." };
-  // A person on an annual salary is paid from the salary on their pay template. Sending ordinary hours would replace it with hours at a rate, so nothing is sent. The hours stay in Reservoir.
-  const salaryLine = picked.lineFor(picked.ordinaryItem.EarningsRateID);
-  if (salaryLine && salaryLine.CalculationType === "ANNUALSALARY") return { ok: true, xeroStatus: "SALARIED", note: "On an annual salary, so nothing was sent to Xero. The hours are kept in Reservoir." };
+  // Salaried people are sent too, as an approved timesheet at their set hours, so Xero holds the hours. Check the draft pay run in Xero before posting that the salary line is unchanged.
   // Public holidays. Xero has a Public Holiday pay rate, so a holiday day goes to Xero on that rate and not as ordinary time. With no such rate in Xero the day is left blank, as the office does by hand.
   const phItem = (items.EarningsRates || []).find((r) => /public\s*holiday/i.test(String(r.Name || "")));
   const isHoliday = days.map((d, i) => !!TS_HOLIDAYS[tsAddDays(sub.week_start, i)]);
@@ -2947,6 +2945,20 @@ async function tsPushXero(env, sub) {
   const second = await send("DRAFT", withPh);
   if (second.ok) return { ...second, note: `Xero would not take it as approved (${first.fail}) so it was sent as a draft. Approve it in Xero.${phNote ? ` ${phNote}` : ""}` };
   return { fail: second.fail };
+}
+// The hours a week a salaried person is paid for, from the payroll snapshot. 0 when they are not on a salary.
+async function tsSalaryHours(env, email) {
+  try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
+}
+// Weeks that were kept in Reservoir only because the person is salaried (before w135) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+async function tsResendSalaried(env) {
+  await tsTables(env);
+  const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
+  for (const row of rows) {
+    const out = await tsPushXero(env, row);
+    if (out.fail) { await env.DB.prepare("UPDATE timesheet_submissions SET last_error = ? WHERE id = ?").bind(String(out.fail).slice(0, 400), row.id).run(); continue; }
+    await env.DB.prepare("UPDATE timesheet_submissions SET xero_status = ?, last_error = NULL WHERE id = ?").bind(out.xeroStatus, row.id).run();
+  }
 }
 // The Xero employee for a signed in person, from the payroll snapshot. Nothing is read from Xero.
 async function tsEmployee(env, email) {
@@ -3317,7 +3329,9 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
     const sub = { id: crypto.randomUUID(), email, name: user.name || "", employee_id: employeeId, week_start: week, week_end: tsAddDays(week, 6), days: JSON.stringify(days), total: tsTotal(days), created_at: new Date().toISOString() };
     const trade = user.tier !== "T1" && user.tier !== "T2" && tsAllTradeSchool(body.dayTypes, days);
     const insert = (status, xeroStatus, error) => env.DB.prepare("INSERT INTO timesheet_submissions (id, email, name, employee_id, week_start, week_end, days, total, status, xero_status, forwarded, last_error, created_at, decided_at, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)").bind(sub.id, sub.email, sub.name, sub.employee_id, sub.week_start, sub.week_end, sub.days, sub.total, status, xeroStatus || null, error || null, sub.created_at, status === "sent" ? sub.created_at : null, status === "sent" ? (trade ? "auto trade school" : "auto") : null).run();
-    if (user.tier === "T1" || user.tier === "T2" || trade) {
+    const salHours = user.tier === "T1" || user.tier === "T2" ? await tsSalaryHours(env, email) : 0;
+    const overSalary = salHours > 0 && sub.total > salHours;
+    if ((user.tier === "T1" || user.tier === "T2" || trade) && !overSalary) {
       const out = await tsPushXero(rawEnv, sub);
       if (out.fail) return reply(env, 502, { error: out.fail });
       await insert("sent", out.xeroStatus);
@@ -3361,6 +3375,8 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
     const row = await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE id = ?").bind(parts[3]).first();
     if (!row) return reply(env, 404, { error: "That timesheet is not there any more." });
     if (row.status !== "pending") return reply(env, 409, { error: row.status === "sent" ? "That timesheet has already been approved." : "That timesheet is not waiting for approval." });
+    const rowSal = await tsSalaryHours(env, row.email);
+    if (rowSal > 0 && Number(row.total) > rowSal && String(row.email).toLowerCase() === email) return reply(env, 403, { error: "That week is over your salary hours, so another director has to approve it." });
     const out = await tsPushXero(rawEnv, row);
     if (out.fail) {
       await env.DB.prepare("UPDATE timesheet_submissions SET last_error = ? WHERE id = ?").bind(out.fail.slice(0, 400), row.id).run();
@@ -3750,6 +3766,7 @@ export default {
     // Every run checks the automatic timesheets and the payroll sweeps. The leave sync keeps its own schedule and is skipped on the half hourly one.
     ctx.waitUntil(tsAutoRun(env).catch((e) => console.log("auto timesheets failed", String(e && e.message || e))));
     ctx.waitUntil(pushFlushHeld(env));
+    ctx.waitUntil(tsResendSalaried(env).catch((e) => console.log("resend salaried failed", String(e && e.message || e))));
     ctx.waitUntil(pushOneOffAndrey(env).catch((e) => console.log("one off failed", String(e && e.message || e))));
     ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
     if (event && event.cron === "*/30 * * * *") return;
@@ -5360,5 +5377,5 @@ export default {
   }
 };
 
-globalThis.w134_BOTTOM = "Reservoir-Worker-2026.10.24-w134";
-// Reservoir-Worker-2026.10.24-w134
+globalThis.w135_BOTTOM = "Reservoir-Worker-2026.10.24-w135";
+// Reservoir-Worker-2026.10.24-w135
