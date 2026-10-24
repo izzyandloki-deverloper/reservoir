@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w145
-globalThis.w145_TOP = "Reservoir-Worker-2026.10.24-w145";
+// Reservoir-Worker-2026.10.25-w146
+globalThis.w146_TOP = "Reservoir-Worker-2026.10.25-w146";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w145";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w146";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3055,6 +3055,37 @@ async function appRequestsRoutes(request, env, user, url) {
   }
   return reply(env, 405, { error: "method not allowed" });
 }
+// ---- Partners added in the app (online portals the office logs into). The seed list stays in the app, only partners added here live in D1. T1 and T2 only. Name, username and password are required.
+let partnersReady = false;
+async function partnersTable(env) {
+  if (partnersReady) return;
+  partnersReady = true;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS partners (id TEXT PRIMARY KEY, kind TEXT, name TEXT NOT NULL, phone TEXT, website TEXT, address TEXT, account TEXT, username TEXT, password TEXT, email TEXT, notes TEXT, by_name TEXT, created_at TEXT, updated_at TEXT)").run();
+}
+async function partnersRoutes(request, env, user, url) {
+  const m = url.pathname.match(/^\/api\/partners(?:\/([A-Za-z0-9_-]{1,64}))?$/);
+  if (!m) return null;
+  if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+  await partnersTable(env);
+  if (request.method === "GET" && !m[1]) {
+    const rows = ((await env.DB.prepare("SELECT id, kind, name, phone, website, address, account, username, password, email, notes FROM partners ORDER BY name COLLATE NOCASE").all()).results) || [];
+    return reply(env, 200, { partners: rows.map((r) => ({ ...r, kind: r.kind || void 0 })), worker: WORKER_BUILD });
+  }
+  if (request.method === "PUT" && m[1]) {
+    let b;
+    try { b = await request.json(); } catch (e) { b = null; }
+    if (!b || typeof b !== "object") return reply(env, 400, { error: "bad json" });
+    const f = (k, n) => String(b[k] == null ? "" : b[k]).trim().slice(0, n || 200);
+    const name = f("name"), username = f("username"), password = String(b.password == null ? "" : b.password).slice(0, 500);
+    if (!name || !username || !password) return reply(env, 400, { error: "A partner needs a name, a username and a password" });
+    const now = new Date().toISOString();
+    const kind = f("kind") === "supplier" ? "supplier" : "";
+    await env.DB.prepare("INSERT INTO partners (id, kind, name, phone, website, address, account, username, password, email, notes, by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, phone = excluded.phone, website = excluded.website, address = excluded.address, account = excluded.account, username = excluded.username, password = excluded.password, email = excluded.email, notes = excluded.notes, by_name = excluded.by_name, updated_at = excluded.updated_at")
+      .bind(m[1], kind, name, f("phone", 40), f("website", 300), f("address", 300), f("account", 100), username, password, f("email", 200), String(b.notes == null ? "" : b.notes).slice(0, 2000), user.name || "", now, now).run();
+    return reply(env, 200, { ok: true });
+  }
+  return reply(env, 405, { error: "method not allowed" });
+}
 async function noticesTable(env) {
   if (noticesReady) return;
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, to_email TEXT NOT NULL, kind TEXT, title TEXT, body TEXT, todo INTEGER NOT NULL DEFAULT 0, link TEXT, data TEXT, by_name TEXT, created_at TEXT DEFAULT (datetime('now')), read_at TEXT, done_at TEXT, done_by TEXT)").run();
@@ -3892,6 +3923,8 @@ export default {
     if (pushReply) return pushReply;
     const reqsReply = await appRequestsRoutes(request, env, user, url);
     if (reqsReply) return reqsReply;
+    const partnersReply = await partnersRoutes(request, env, user, url);
+    if (partnersReply) return partnersReply;
     const noticesReply = await noticesRoutes(request, env, user, url);
     if (noticesReply) return noticesReply;
     // The app background everyone sees. Any tier can read which one is chosen, only a director (T1) can change it. The pictures themselves are built into the app, so only the name is stored.
@@ -5486,5 +5519,5 @@ export default {
   }
 };
 
-globalThis.w145_BOTTOM = "Reservoir-Worker-2026.10.24-w145";
-// Reservoir-Worker-2026.10.24-w145
+globalThis.w146_BOTTOM = "Reservoir-Worker-2026.10.25-w146";
+// Reservoir-Worker-2026.10.25-w146
