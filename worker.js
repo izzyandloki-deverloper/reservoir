@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w135
-globalThis.w135_TOP = "Reservoir-Worker-2026.10.24-w135";
+// Reservoir-Worker-2026.10.24-w137
+globalThis.w137_TOP = "Reservoir-Worker-2026.10.24-w137";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w135";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w137";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2950,7 +2950,7 @@ async function tsPushXero(env, sub) {
 async function tsSalaryHours(env, email) {
   try { const r = await env.DB.prepare("SELECT annual_salary, week_hours FROM xero_payroll WHERE lower(email) = ?").bind(String(email || "").toLowerCase()).first(); return r && Number(r.annual_salary) > 0 ? Number(r.week_hours) || 0 : 0; } catch (e) { return 0; }
 }
-// Weeks that were kept in Reservoir only because the person is salaried (before w135) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
+// Weeks that were kept in Reservoir only because the person is salaried (before w137) are sent to Xero now. It only touches weeks from 19 Oct 2026 and each row is done once.
 async function tsResendSalaried(env) {
   await tsTables(env);
   const rows = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE xero_status = 'SALARIED' AND week_start >= '2026-10-19' LIMIT 10").all()).results) || [];
@@ -3172,7 +3172,9 @@ async function noticesRoutes(request, env, user, url) {
   }
   return reply(env, 404, { error: "not found" });
 }
-const tsCanApprove = (user) => user.tier === "T1";
+// For now every approval, of any kind, is Tayler's alone. Andrew and Mitch can still see things; they cannot decide them. This is the one place to change when approvals are shared out.
+const isApprover = (user) => user.tier === "T1" && /^tayler\b/i.test(String(user.name || "").trim());
+const tsCanApprove = (user) => isApprover(user);
 const tsRowOut = (r) => ({ id: r.id, name: r.name || r.email, week: r.week_start, weekEnd: r.week_end, total: Number(r.total) || 0, days: (() => { try { return JSON.parse(r.days || "[]"); } catch (e) { return []; } })(), createdAt: r.created_at || "", error: r.last_error || "" });
 
 // The director's weekly view: one card per person for the week being paid, then a history of earlier pay periods.
@@ -3320,6 +3322,11 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
     if (bad) return reply(env, 400, { error: bad });
     const days = tsCleanDays(body.days);
     if (!days) return reply(env, 400, { error: "The hours on that timesheet are not valid." });
+    // Casual staff are not paid public holidays, so those days go through as zero.
+    try {
+      const basis = await env.DB.prepare("SELECT employment_basis FROM xero_payroll WHERE lower(email) = ?").bind(email).first();
+      if (basis && /casual/i.test(String(basis.employment_basis || ""))) days.forEach((d, i) => { if (TS_HOLIDAYS[tsAddDays(week, i)]) { d.ord = 0; d.ot15 = 0; d.ot2 = 0; } });
+    } catch (e) { /* the app already shows those days as zero */ }
     if (tsTotal(days) <= 0) return reply(env, 400, { error: "There are no hours to submit." });
     await tsTables(env);
     const employeeId = await tsEmployee(env, email);
@@ -3329,9 +3336,9 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
     const sub = { id: crypto.randomUUID(), email, name: user.name || "", employee_id: employeeId, week_start: week, week_end: tsAddDays(week, 6), days: JSON.stringify(days), total: tsTotal(days), created_at: new Date().toISOString() };
     const trade = user.tier !== "T1" && user.tier !== "T2" && tsAllTradeSchool(body.dayTypes, days);
     const insert = (status, xeroStatus, error) => env.DB.prepare("INSERT INTO timesheet_submissions (id, email, name, employee_id, week_start, week_end, days, total, status, xero_status, forwarded, last_error, created_at, decided_at, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)").bind(sub.id, sub.email, sub.name, sub.employee_id, sub.week_start, sub.week_end, sub.days, sub.total, status, xeroStatus || null, error || null, sub.created_at, status === "sent" ? sub.created_at : null, status === "sent" ? (trade ? "auto trade school" : "auto") : null).run();
-    const salHours = user.tier === "T1" || user.tier === "T2" ? await tsSalaryHours(env, email) : 0;
-    const overSalary = salHours > 0 && sub.total > salHours;
-    if ((user.tier === "T1" || user.tier === "T2" || trade) && !overSalary) {
+    // Tayler, Andrew, Mitch and Andrey are approved on the spot. The plumbers wait for Tayler.
+    const autoOk = user.tier === "T1" || user.tier === "T2" || trade || /^(tayler|andrew|mitch|andrey)\b/i.test(String(user.name || "").trim());
+    if (autoOk) {
       const out = await tsPushXero(rawEnv, sub);
       if (out.fail) return reply(env, 502, { error: out.fail });
       await insert("sent", out.xeroStatus);
@@ -3375,8 +3382,6 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
     const row = await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE id = ?").bind(parts[3]).first();
     if (!row) return reply(env, 404, { error: "That timesheet is not there any more." });
     if (row.status !== "pending") return reply(env, 409, { error: row.status === "sent" ? "That timesheet has already been approved." : "That timesheet is not waiting for approval." });
-    const rowSal = await tsSalaryHours(env, row.email);
-    if (rowSal > 0 && Number(row.total) > rowSal && String(row.email).toLowerCase() === email) return reply(env, 403, { error: "That week is over your salary hours, so another director has to approve it." });
     const out = await tsPushXero(rawEnv, row);
     if (out.fail) {
       await env.DB.prepare("UPDATE timesheet_submissions SET last_error = ? WHERE id = ?").bind(out.fail.slice(0, 400), row.id).run();
@@ -3577,7 +3582,7 @@ async function leaveRoutes(request, env, user, url) {
       return reply(env, 200, { items, away: away.map((x) => leaveOut(x, dm)), worker: WORKER_BUILD });
     }
     if (parts.length === 4 && parts[3] === "decide" && method === "POST") {
-      if (!office) return reply(env, 403, { error: "forbidden" });
+      if (!isApprover(user)) return reply(env, 403, { error: "forbidden" });
       const row = await env.DB.prepare("SELECT * FROM xero_leave WHERE id = ?").bind(parts[2]).first();
       if (!row || row.status !== "pending") return reply(env, 409, { error: "That request is no longer waiting" });
       const b = await body();
@@ -4279,7 +4284,7 @@ export default {
         if (row.status === "processed") return reply(env, 200, { request: profileRequestOut(row), alreadyDone: true });
         if (row.section === "personal" || row.section === "emergency") {
           // Director only. Preferred name and personal email are saved here. Address and mobile go to Xero first and are read back. The emergency contact is kept in our own table, because Xero Payroll AU has no emergency contact field.
-          if (user.tier !== "T1") return reply(env, 403, { error: "Only a director can process profile changes" });
+          if (!isApprover(user)) return reply(env, 403, { error: "Only Tayler can process profile changes for now" });
           let vals = {};
           try { vals = JSON.parse(row.vals || "{}"); } catch (e) { /* nothing */ }
           const mail = String(row.email || "").toLowerCase();
@@ -4317,7 +4322,7 @@ export default {
         }
         if (row.section === "bank" || row.section === "super") {
           // Bank and super go to Xero first. Only a director can press this, and nothing is marked processed unless Xero took the change.
-          if (user.tier !== "T1") return reply(env, 403, { error: "Only a director can process bank and super changes" });
+          if (!isApprover(user)) return reply(env, 403, { error: "Only Tayler can process bank and super changes for now" });
           let vals = {};
           try { vals = JSON.parse(row.vals || "{}"); } catch (e) { /* nothing */ }
           const dx = await env.DB.prepare("SELECT xero_employee_id FROM dfp_xero WHERE email = ?").bind(String(row.email || "").toLowerCase()).first();
@@ -5201,7 +5206,7 @@ export default {
         return reply(env, 200, { ok: true });
       }
       if (request.method === "POST" && rrm[1]) {
-        if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
+        if (!isApprover(user)) return reply(env, 403, { error: "forbidden" });
         if (!["paid", "declined"].includes(body.status)) return reply(env, 400, { error: "bad status" });
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? body.date : today;
         await env.DB.prepare("UPDATE receipt_records SET status = ?, done_date = ? WHERE id = ?").bind(body.status, date, rrm[1]).run();
@@ -5377,5 +5382,5 @@ export default {
   }
 };
 
-globalThis.w135_BOTTOM = "Reservoir-Worker-2026.10.24-w135";
-// Reservoir-Worker-2026.10.24-w135
+globalThis.w137_BOTTOM = "Reservoir-Worker-2026.10.24-w137";
+// Reservoir-Worker-2026.10.24-w137
