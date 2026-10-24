@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w146
-globalThis.w146_TOP = "Reservoir-Worker-2026.10.25-w146";
+// Reservoir-Worker-2026.10.25-w147
+globalThis.w147_TOP = "Reservoir-Worker-2026.10.25-w147";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w146";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w147";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3105,7 +3105,7 @@ async function noticesTable(env) {
   }
 }
 // Push notifications. Which kinds of notice also go to people's phones is decided here, once. Anything marked todo (someone has to act) also pushes. To change what pushes, change this list.
-const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request"];
+const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request", "policy"];
 const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
 const b64uDec = (str) => { const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/"); const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4)); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
@@ -4103,6 +4103,14 @@ export default {
           const found = !keep && pub.body ? findLastUpdated(pub.body) : null;
           await env.DB.prepare("UPDATE policies SET item_id = ?, file_name = ?, docx_item_id = ?, docx_name = ?, body = ?, effective = ?, version = ?, folder = ?, updated_by = ?, updated_at = datetime('now')" + (keep ? "" : ", updated_on = ?, updated_src = ?") + " WHERE id = ?").bind(...[pub.itemId, pub.fileName, pub.docxId, pub.docxName, pub.body, pub.effective, next, folder, who, ...(keep ? [] : [found ? found.iso : null, policySrc(found)]), row.id]).run();
           const outV = await env.DB.prepare("SELECT id, title, item_id, file_name, needs_ack, updated_at, updated_on, updated_src, version, folder, docx_item_id, docx_name, effective, kind FROM policies WHERE id = ?").bind(row.id).first();
+          // A new version wipes everyone's acknowledgement (the app matches on version), so every active staff member except the director is told to read and acknowledge it again.
+          if (row.needs_ack) {
+            try {
+              const isHb = docKind(row.kind) !== "policy";
+              const staff = (((await env.DB.prepare("SELECT email, name FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE')").all()).results) || []).filter((p) => !/andrew\s+wowk/i.test(String(p.name || "")));
+              for (const p of staff) await notify(env, { to: String(p.email).toLowerCase(), kind: "policy", title: `${row.title} has been updated`, body: `A new version of the ${isHb ? "handbook" : "policy"} is out. Open it, read it to the end and acknowledge it again.`, link: isHb ? "handbook" : "policies", by: user.name || who });
+            } catch (e) { console.log("policy notice failed", String(e && e.message || e).slice(0, 200)); }
+          }
           return reply(env, 200, { policy: policyOut(outV), archived });
         } else if (pm[2] === "/text" && request.method === "POST") {
           return reply(env, 200, await policyTextSave(env, row, request));
@@ -5519,5 +5527,5 @@ export default {
   }
 };
 
-globalThis.w146_BOTTOM = "Reservoir-Worker-2026.10.25-w146";
-// Reservoir-Worker-2026.10.25-w146
+globalThis.w147_BOTTOM = "Reservoir-Worker-2026.10.25-w147";
+// Reservoir-Worker-2026.10.25-w147
