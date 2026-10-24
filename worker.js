@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w130
-globalThis.w130_TOP = "Reservoir-Worker-2026.10.24-w130";
+// Reservoir-Worker-2026.10.24-w131
+globalThis.w131_TOP = "Reservoir-Worker-2026.10.24-w131";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w130";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w131";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2991,23 +2991,28 @@ async function pushTable(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, email TEXT NOT NULL, tier TEXT, p256dh TEXT NOT NULL, auth TEXT NOT NULL, ua TEXT, created_at TEXT DEFAULT (datetime('now')), last_ok TEXT)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS push_subs_email ON push_subs (email)").run();
   try { await env.DB.prepare("ALTER TABLE push_subs ADD COLUMN all_hours INTEGER NOT NULL DEFAULT 0").run(); } catch (e) { /* already there */ }
+  try { await env.DB.prepare("ALTER TABLE push_subs ADD COLUMN hours_mode TEXT").run(); } catch (e) { /* already there */ }
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS push_held (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))").run();
   pushReady = true;
 }
-// Push only goes out Monday to Friday, 7am to 4:30pm Melbourne time, unless that phone has chosen 24 hour push. Anything held back is counted and sent as one push when the next business day starts. The notice itself is always in the shield.
-function pushInHours(d) {
+// Each phone picks when push may reach it. Weekday windows are Monday to Friday in Melbourne time, or 24 hours every day. Anything held back is counted and sent as one push when that phone's window next opens. The notice itself is always in the shield.
+const PUSH_MODES = { "0730-1600": [450, 960], "0700-1630": [420, 990], "0600-1800": [360, 1080], "24": null };
+const pushModeOf = (row) => (row && row.hours_mode && Object.prototype.hasOwnProperty.call(PUSH_MODES, row.hours_mode)) ? row.hours_mode : (row && row.all_hours ? "24" : "0700-1630");
+function pushInHours(mode, d) {
+  const w = PUSH_MODES[mode || "0700-1630"];
+  if (w === null) return true;
   const parts = new Intl.DateTimeFormat("en-AU", { timeZone: "Australia/Melbourne", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(d || new Date());
   const get = (t) => (parts.find((x) => x.type === t) || {}).value || "";
   const mins = (Number(get("hour")) % 24) * 60 + Number(get("minute"));
-  return !["Sat", "Sun"].includes(get("weekday")) && mins >= 420 && mins < 990;
+  return !["Sat", "Sun"].includes(get("weekday")) && mins >= w[0] && mins < w[1];
 }
 async function pushFlushHeld(env) {
   try {
-    if (!pushInHours()) return;
     await pushTable(env);
     const rows = ((await env.DB.prepare("SELECT endpoint, COUNT(*) AS n FROM push_held GROUP BY endpoint").all()).results) || [];
     for (const r of rows) {
       const sub = await env.DB.prepare("SELECT * FROM push_subs WHERE endpoint = ?").bind(r.endpoint).first();
+      if (sub && !pushInHours(pushModeOf(sub))) continue;
       if (sub) await pushSendOne(env, sub, { title: "Reservoir", body: r.n === 1 ? "You have 1 notification waiting in Reservoir" : `You have ${r.n} notifications waiting in Reservoir`, tag: "held", open: "notices" });
       await env.DB.prepare("DELETE FROM push_held WHERE endpoint = ?").bind(r.endpoint).run();
     }
@@ -3074,9 +3079,8 @@ async function pushForNotice(env, n, id) {
       : ((await env.DB.prepare("SELECT * FROM push_subs WHERE email = ?").bind(to).all()).results) || [];
     if (!rows.length) return;
     const payload = { title: String(n.title || "Reservoir").slice(0, 120), body: "Open Reservoir to read it", tag: `n-${id || Date.now()}`, open: "notices" };
-    const open = pushInHours();
     await Promise.allSettled(rows.map(async (r) => {
-      if (open || r.all_hours) return pushSendOne(env, r, payload);
+      if (pushInHours(pushModeOf(r))) return pushSendOne(env, r, payload);
       await env.DB.prepare("INSERT INTO push_held (endpoint) VALUES (?)").bind(r.endpoint).run();
     }));
   } catch (e) { console.log("push for notice failed", String(e && e.message || e).slice(0, 160)); }
@@ -3089,9 +3093,9 @@ async function pushRoutes(request, env, user, url) {
   if (url.pathname === "/api/push/key" && request.method === "GET") return reply(env, 200, { key: (await pushKeys(env)).pub });
   if (url.pathname === "/api/push/status" && request.method === "GET") {
     const ep = url.searchParams.get("endpoint") || "";
-    const row = ep ? await env.DB.prepare("SELECT email, all_hours FROM push_subs WHERE endpoint = ? AND email = ?").bind(ep, email).first() : null;
+    const row = ep ? await env.DB.prepare("SELECT email, all_hours, hours_mode FROM push_subs WHERE endpoint = ? AND email = ?").bind(ep, email).first() : null;
     const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_subs WHERE email = ?").bind(email).first();
-    return reply(env, 200, { subscribed: !!row, allHours: !!(row && row.all_hours), devices: n ? n.n : 0 });
+    return reply(env, 200, { subscribed: !!row, mode: row ? pushModeOf(row) : "", devices: n ? n.n : 0 });
   }
   if (request.method !== "POST") return reply(env, 405, { error: "method not allowed" });
   if (user.viewAs) return reply(env, 403, { error: "Viewing as someone else is read only." });
@@ -3101,11 +3105,13 @@ async function pushRoutes(request, env, user, url) {
     const s = body.subscription || {};
     const ep = String(s.endpoint || ""), p = String(s.keys && s.keys.p256dh || ""), a = String(s.keys && s.keys.auth || "");
     if (!/^https:\/\//.test(ep) || ep.length > 600 || !p || !a) return reply(env, 400, { error: "That subscription is not valid" });
-    await env.DB.prepare("INSERT INTO push_subs (endpoint, email, tier, p256dh, auth, ua) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET email = excluded.email, tier = excluded.tier, p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua").bind(ep, email, String(user.tier || "T3"), p, a, String(body.ua || "").slice(0, 160)).run();
+    const subMode = Object.prototype.hasOwnProperty.call(PUSH_MODES, String(body.mode)) ? String(body.mode) : null;
+    await env.DB.prepare("INSERT INTO push_subs (endpoint, email, tier, p256dh, auth, ua, hours_mode, all_hours) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, '0700-1630'), ?) ON CONFLICT(endpoint) DO UPDATE SET email = excluded.email, tier = excluded.tier, p256dh = excluded.p256dh, auth = excluded.auth, ua = excluded.ua, hours_mode = COALESCE(?, hours_mode), all_hours = CASE WHEN ? IS NULL THEN all_hours WHEN ? = '24' THEN 1 ELSE 0 END").bind(ep, email, String(user.tier || "T3"), p, a, String(body.ua || "").slice(0, 160), subMode, subMode === "24" ? 1 : 0, subMode, subMode, subMode).run();
     return reply(env, 200, { ok: true });
   }
   if (url.pathname === "/api/push/hours") {
-    await env.DB.prepare("UPDATE push_subs SET all_hours = ? WHERE endpoint = ? AND email = ?").bind(body.allHours ? 1 : 0, String(body.endpoint || ""), email).run();
+    const mode = Object.prototype.hasOwnProperty.call(PUSH_MODES, String(body.mode)) ? String(body.mode) : "0700-1630";
+    await env.DB.prepare("UPDATE push_subs SET hours_mode = ?, all_hours = ? WHERE endpoint = ? AND email = ?").bind(mode, mode === "24" ? 1 : 0, String(body.endpoint || ""), email).run();
     return reply(env, 200, { ok: true });
   }
   if (url.pathname === "/api/push/unsubscribe") {
@@ -5334,5 +5340,5 @@ export default {
   }
 };
 
-globalThis.w130_BOTTOM = "Reservoir-Worker-2026.10.24-w130";
-// Reservoir-Worker-2026.10.24-w130
+globalThis.w131_BOTTOM = "Reservoir-Worker-2026.10.24-w131";
+// Reservoir-Worker-2026.10.24-w131
