@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w132
-globalThis.w132_TOP = "Reservoir-Worker-2026.10.24-w132";
+// Reservoir-Worker-2026.10.24-w133
+globalThis.w133_TOP = "Reservoir-Worker-2026.10.24-w133";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w132";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w133";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3321,6 +3321,7 @@ async function tsSubmitRoutes(request, env, user, url, parts) {
       const out = await tsPushXero(rawEnv, sub);
       if (out.fail) return reply(env, 502, { error: out.fail });
       await insert("sent", out.xeroStatus);
+      await notify(env, { to: sub.email, kind: "timesheet", title: "Timesheet approved", body: `Your timesheet for ${tsDmy(sub.week_start)} to ${tsDmy(sub.week_end)} has been approved.`, link: "timesheets", by: "Reservoir" });
       return reply(env, 200, { ok: true, state: "sent", xeroStatus: out.xeroStatus, note: out.note || "", worker: WORKER_BUILD });
     }
     await insert("pending");
@@ -5353,5 +5354,5 @@ export default {
   }
 };
 
-globalThis.w132_BOTTOM = "Reservoir-Worker-2026.10.24-w132";
-// Reservoir-Worker-2026.10.24-w132
+globalThis.w133_BOTTOM = "Reservoir-Worker-2026.10.24-w133";
+// Reservoir-Worker-2026.10.24-w133
