@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w144
-globalThis.w144_TOP = "Reservoir-Worker-2026.10.24-w144";
+// Reservoir-Worker-2026.10.24-w145
+globalThis.w145_TOP = "Reservoir-Worker-2026.10.24-w145";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w144";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w145";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -1500,6 +1500,10 @@ async function uploadUnderItem(env, driveBase, folderId, subSegs, fileName, byte
 }
 // ---- Policies, stored in D1 with the PDFs in SharePoint ----
 let policyAckMade = false;
+async function policyAckTable(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS policy_ack_log (id INTEGER PRIMARY KEY AUTOINCREMENT, person_key TEXT NOT NULL, name TEXT, email TEXT, policy_id TEXT NOT NULL, policy_title TEXT, version INTEGER, opened_at TEXT, read_at TEXT, acked_at TEXT NOT NULL)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS policy_ack_person ON policy_ack_log (person_key, policy_id)").run();
+}
 async function policyTable(env) {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS policies (id TEXT PRIMARY KEY, title TEXT NOT NULL, item_id TEXT, file_name TEXT, needs_ack INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0, updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')), version INTEGER NOT NULL DEFAULT 1, folder TEXT)").run();
   if (!policyAckMade) { try { await env.DB.prepare("UPDATE policies SET needs_ack = 1 WHERE needs_ack <> 1").run(); policyAckMade = true; } catch (e) { /* tried again next time */ } }
@@ -3912,6 +3916,46 @@ export default {
     const arofloReply = await arofloRoutes(request, env, user, url);
     if (arofloReply) return arofloReply;
 
+    if (url.pathname === "/api/policies/acks" && request.method === "GET") {
+      // The signed in person's own acknowledgements. The latest one for each policy.
+      try {
+        await policyAckTable(env);
+        const who = ppePerson(user);
+        if (!who.key) return reply(env, 200, { acks: {} });
+        const rows = ((await env.DB.prepare("SELECT policy_id, version, opened_at, read_at, acked_at FROM policy_ack_log WHERE person_key = ? ORDER BY id").bind(who.key).all()).results) || [];
+        const acks = {};
+        for (const r of rows) acks[r.policy_id] = { version: r.version, openedAt: r.opened_at, readAt: r.read_at, ackedAt: r.acked_at };
+        return reply(env, 200, { acks });
+      } catch (e) {
+        console.log("policy acks read error", String(e && e.message || e));
+        return reply(env, 500, { error: "Could not read the acknowledgements" });
+      }
+    }
+    const ackRoute = url.pathname.match(/^\/api\/policies\/([^/]+)\/ack$/);
+    if (ackRoute && request.method === "POST") {
+      // An acknowledgement. Every one is kept for good: who, which policy and version, when it was opened, when it was read to the end, and when it was acknowledged.
+      let body;
+      try { body = await request.json(); } catch { return reply(env, 400, { error: "bad json" }); }
+      const iso = (v) => { const t = Date.parse(String(v || "")); return Number.isFinite(t) ? new Date(t).toISOString() : ""; };
+      const openedAt = iso(body.openedAt), readAt = iso(body.readAt);
+      if (!openedAt || !readAt) return reply(env, 400, { error: "Open the policy and read it to the end before acknowledging." });
+      try {
+        await policyTable(env);
+        await policyAckTable(env);
+        const id = decodeURIComponent(ackRoute[1]);
+        const pol = await env.DB.prepare("SELECT id, title, version FROM policies WHERE id = ? AND removed = 0").bind(id).first();
+        if (!pol) return reply(env, 404, { error: "That policy was not found" });
+        const who = ppePerson(user);
+        if (!who.key) return reply(env, 400, { error: "No name on your sign in" });
+        const ackedAt = new Date().toISOString();
+        await env.DB.prepare("INSERT INTO policy_ack_log (person_key, name, email, policy_id, policy_title, version, opened_at, read_at, acked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(who.key, who.name, who.email, pol.id, pol.title, pol.version || 1, openedAt, readAt, ackedAt).run();
+        return reply(env, 200, { saved: true, ackedAt, version: pol.version || 1 });
+      } catch (e) {
+        console.log("policy ack error", String(e && e.message || e));
+        return reply(env, 500, { error: "Could not save the acknowledgement" });
+      }
+    }
     if (url.pathname === "/api/policies/search" && request.method === "GET") {
       // Staff search: matches the policy title or the text inside the current Word version. Any signed in tier.
       try {
@@ -5442,5 +5486,5 @@ export default {
   }
 };
 
-globalThis.w144_BOTTOM = "Reservoir-Worker-2026.10.24-w144";
-// Reservoir-Worker-2026.10.24-w144
+globalThis.w145_BOTTOM = "Reservoir-Worker-2026.10.24-w145";
+// Reservoir-Worker-2026.10.24-w145
