@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w128
-globalThis.w128_TOP = "Reservoir-Worker-2026.10.24-w128";
+// Reservoir-Worker-2026.10.24-w129
+globalThis.w129_TOP = "Reservoir-Worker-2026.10.24-w129";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w128";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w129";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -5087,6 +5087,19 @@ export default {
     }
 
     // The receipt history. Every receipt sent from Reservoir is kept here, so it is still there after the app is closed and the office can see reimbursements from other phones. The files themselves are in SharePoint. The office (T1) sees every receipt, T2 sees their own. Only T1 marks a reimbursement paid or declined.
+    const rdel = url.pathname.match(/^\/api\/receipt-records\/([A-Za-z0-9_-]{1,64})$/);
+    if (rdel && request.method === "DELETE") {
+      // Remove a receipt for good: the SharePoint file and the saved record. T1 only.
+      if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
+      await receiptRecordsTable(env);
+      const row = await env.DB.prepare("SELECT item_id FROM receipt_records WHERE id = ?").bind(rdel[1]).first();
+      if (row && row.item_id) {
+        try { await graphFetch(env, `/sites/${siteId(env)}/drive/items/${row.item_id}`, { method: "DELETE" }); } catch (e) { /* the record still goes */ }
+      }
+      await env.DB.prepare("DELETE FROM receipt_records WHERE id = ?").bind(rdel[1]).run();
+      return reply(env, 200, { ok: true });
+    }
+
     const rrm = url.pathname.match(/^\/api\/receipt-records(?:\/([A-Za-z0-9_-]{1,64})\/status)?$/);
     if (rrm) {
       // Anyone signed in can send a reimbursement and see their own. Only T1 and T2 handle company receipts, and only T1 processes a reimbursement.
@@ -5291,5 +5304,5 @@ export default {
   }
 };
 
-globalThis.w128_BOTTOM = "Reservoir-Worker-2026.10.24-w128";
-// Reservoir-Worker-2026.10.24-w128
+globalThis.w129_BOTTOM = "Reservoir-Worker-2026.10.24-w129";
+// Reservoir-Worker-2026.10.24-w129
