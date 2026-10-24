@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w150
-globalThis.w150_TOP = "Reservoir-Worker-2026.10.25-w150";
+// Reservoir-Worker-2026.10.25-w151
+globalThis.w151_TOP = "Reservoir-Worker-2026.10.25-w151";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w150";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w151";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3107,6 +3107,7 @@ async function partnersTable(env) {
   if (partnersReady) return;
   partnersReady = true;
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS partners (id TEXT PRIMARY KEY, kind TEXT, name TEXT NOT NULL, phone TEXT, website TEXT, address TEXT, account TEXT, username TEXT, password TEXT, email TEXT, notes TEXT, by_name TEXT, created_at TEXT, updated_at TEXT)").run();
+  try { await env.DB.prepare("ALTER TABLE partners ADD COLUMN removed INTEGER NOT NULL DEFAULT 0").run(); } catch (e) { /* already there */ }
 }
 async function partnersRoutes(request, env, user, url) {
   const m = url.pathname.match(/^\/api\/partners(?:\/([A-Za-z0-9_-]{1,64}))?$/);
@@ -3114,8 +3115,9 @@ async function partnersRoutes(request, env, user, url) {
   if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
   await partnersTable(env);
   if (request.method === "GET" && !m[1]) {
-    const rows = ((await env.DB.prepare("SELECT id, kind, name, phone, website, address, account, username, password, email, notes FROM partners ORDER BY name COLLATE NOCASE").all()).results) || [];
-    return reply(env, 200, { partners: rows.map((r) => ({ ...r, kind: r.kind || void 0 })), worker: WORKER_BUILD });
+    const rows = ((await env.DB.prepare("SELECT id, kind, name, phone, website, address, account, username, password, email, notes FROM partners WHERE removed = 0 ORDER BY name COLLATE NOCASE").all()).results) || [];
+    const gone = ((await env.DB.prepare("SELECT id FROM partners WHERE removed = 1").all()).results) || [];
+    return reply(env, 200, { partners: rows.map((r) => ({ ...r, kind: r.kind || void 0 })), removed: gone.map((r) => r.id), worker: WORKER_BUILD });
   }
   if (request.method === "PUT" && m[1]) {
     let b;
@@ -3123,11 +3125,19 @@ async function partnersRoutes(request, env, user, url) {
     if (!b || typeof b !== "object") return reply(env, 400, { error: "bad json" });
     const f = (k, n) => String(b[k] == null ? "" : b[k]).trim().slice(0, n || 200);
     const name = f("name"), username = f("username"), password = String(b.password == null ? "" : b.password).slice(0, 500);
-    if (!name || !username || !password) return reply(env, 400, { error: "A partner needs a name, a username and a password" });
+    // Partners added in the app (ids starting with u) must have a username and password. The built in list can be renamed or changed without them.
+    const added = /^u/.test(m[1]);
+    if (!name || (added && (!username || !password))) return reply(env, 400, { error: "A partner needs a name, a username and a password" });
     const now = new Date().toISOString();
     const kind = f("kind") === "supplier" ? "supplier" : "";
-    await env.DB.prepare("INSERT INTO partners (id, kind, name, phone, website, address, account, username, password, email, notes, by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, phone = excluded.phone, website = excluded.website, address = excluded.address, account = excluded.account, username = excluded.username, password = excluded.password, email = excluded.email, notes = excluded.notes, by_name = excluded.by_name, updated_at = excluded.updated_at")
+    await env.DB.prepare("INSERT INTO partners (id, kind, name, phone, website, address, account, username, password, email, notes, by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET removed = 0, kind = excluded.kind, name = excluded.name, phone = excluded.phone, website = excluded.website, address = excluded.address, account = excluded.account, username = excluded.username, password = excluded.password, email = excluded.email, notes = excluded.notes, by_name = excluded.by_name, updated_at = excluded.updated_at")
       .bind(m[1], kind, name, f("phone", 40), f("website", 300), f("address", 300), f("account", 100), username, password, f("email", 200), String(b.notes == null ? "" : b.notes).slice(0, 2000), user.name || "", now, now).run();
+    return reply(env, 200, { ok: true });
+  }
+  if (request.method === "DELETE" && m[1]) {
+    // Removes a partner for everyone. The built in list lives in the app, so a removed one is kept as a marker the app hides.
+    const now = new Date().toISOString();
+    await env.DB.prepare("INSERT INTO partners (id, name, removed, by_name, created_at, updated_at) VALUES (?, '(removed)', 1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET removed = 1, by_name = excluded.by_name, updated_at = excluded.updated_at").bind(m[1], user.name || "", now, now).run();
     return reply(env, 200, { ok: true });
   }
   return reply(env, 405, { error: "method not allowed" });
@@ -5574,5 +5584,5 @@ export default {
   }
 };
 
-globalThis.w150_BOTTOM = "Reservoir-Worker-2026.10.25-w150";
-// Reservoir-Worker-2026.10.25-w150
+globalThis.w151_BOTTOM = "Reservoir-Worker-2026.10.25-w151";
+// Reservoir-Worker-2026.10.25-w151
