@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.24-w131
-globalThis.w131_TOP = "Reservoir-Worker-2026.10.24-w131";
+// Reservoir-Worker-2026.10.24-w132
+globalThis.w132_TOP = "Reservoir-Worker-2026.10.24-w132";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w131";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.24-w132";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3725,12 +3725,25 @@ async function payrollSweep(env) {
   await payrollSweepNote(env, now.date, `Filed pay run paid ${run.payment_date}. ${ts}`);
 }
 
+// One off test: Saturday 24 Oct 2026, first half hour tick at or after 3:30pm Melbourne sends Andrey a timesheet reminder push. Sends once only.
+async function pushOneOffAndrey(env) {
+  const now = tsMelbourne(new Date());
+  if (now.date !== "2026-10-24" || now.mins < 15 * 60 + 30 || now.mins > 18 * 60) return;
+  await settingsTable(env);
+  const done = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'oneoff.andrey_ts_push'").first();
+  if (done) return;
+  await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES ('oneoff.andrey_ts_push', '1', 'sent', 'One off', datetime('now'))").run();
+  await pushTable(env);
+  const rows = ((await env.DB.prepare("SELECT DISTINCT email FROM push_subs WHERE lower(email) LIKE 'andrey%'").all()).results) || [];
+  for (const r of rows) await notify(env, { to: r.email, kind: "timesheet", title: "Submit your timesheet", body: "Please submit your timesheet for this week.", by: "Reminder" });
+}
 export default {
   // Runs on a Cloudflare cron trigger if one is added (for example Thursday early morning). It only refreshes leave balances and leave history from Xero into D1.
   async scheduled(event, env, ctx) {
     // Every run checks the automatic timesheets and the payroll sweeps. The leave sync keeps its own schedule and is skipped on the half hourly one.
     ctx.waitUntil(tsAutoRun(env).catch((e) => console.log("auto timesheets failed", String(e && e.message || e))));
     ctx.waitUntil(pushFlushHeld(env));
+    ctx.waitUntil(pushOneOffAndrey(env).catch((e) => console.log("one off failed", String(e && e.message || e))));
     ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
     if (event && event.cron === "*/30 * * * *") return;
     ctx.waitUntil(leaveSync(env).catch((e) => console.log("leave sync failed", String(e && e.message || e))));
@@ -5340,5 +5353,5 @@ export default {
   }
 };
 
-globalThis.w131_BOTTOM = "Reservoir-Worker-2026.10.24-w131";
-// Reservoir-Worker-2026.10.24-w131
+globalThis.w132_BOTTOM = "Reservoir-Worker-2026.10.24-w132";
+// Reservoir-Worker-2026.10.24-w132
