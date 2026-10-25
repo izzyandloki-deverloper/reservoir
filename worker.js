@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w152
-globalThis.w152_TOP = "Reservoir-Worker-2026.10.25-w152";
+// Reservoir-Worker-2026.10.25-w153
+globalThis.w153_TOP = "Reservoir-Worker-2026.10.25-w153";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w152";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w153";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3163,6 +3163,7 @@ async function todosRoutes(request, env, user, url) {
     for (const w of ws) { let a = []; try { a = JSON.parse(w.members || "[]"); } catch (e) { a = []; } workspaces[w.name] = a; }
     const rows = ((await env.DB.prepare("SELECT id, title, note, assigned_to, ws, due, repeat, done, by_name, created FROM todo_items ORDER BY created DESC, rowid DESC").all()).results) || [];
     const items = rows.filter((r) => {
+      if (senior) return true;
       const mine = firstOf(r.assigned_to) === me || r.by_name === me;
       if (mine) return true;
       if (!r.ws || !(workspaces[r.ws] || []).includes(me)) return false;
@@ -3180,6 +3181,15 @@ async function todosRoutes(request, env, user, url) {
     if (!senior && !(cur && curMembers.includes(me))) return reply(env, 403, { error: "forbidden" });
     const now = new Date().toISOString();
     await env.DB.prepare("INSERT INTO todo_workspaces (name, members, by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET members = excluded.members, updated_at = excluded.updated_at").bind(name, JSON.stringify(members), me, now, now).run();
+    return reply(env, 200, { ok: true });
+  }
+  if (request.method === "DELETE" && m[1] === "workspaces") {
+    if (!senior) return reply(env, 403, { error: "forbidden" });
+    const name = decodeURIComponent(m[2]).trim().slice(0, 50);
+    const openCount = await env.DB.prepare("SELECT COUNT(*) AS n FROM todo_items WHERE ws = ? AND done = 0").bind(name).first();
+    if (openCount && openCount.n > 0) return reply(env, 409, { error: "The workspace still has open action items" });
+    await env.DB.prepare("DELETE FROM todo_items WHERE ws = ? AND done = 1").bind(name).run();
+    await env.DB.prepare("DELETE FROM todo_workspaces WHERE name = ?").bind(name).run();
     return reply(env, 200, { ok: true });
   }
   if (request.method === "PUT" && m[1] === "items") {
@@ -5651,5 +5661,5 @@ export default {
   }
 };
 
-globalThis.w152_BOTTOM = "Reservoir-Worker-2026.10.25-w152";
-// Reservoir-Worker-2026.10.25-w152
+globalThis.w153_BOTTOM = "Reservoir-Worker-2026.10.25-w153";
+// Reservoir-Worker-2026.10.25-w153
