@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w156
-globalThis.w156_TOP = "Reservoir-Worker-2026.10.26-w156";
+// Reservoir-Worker-2026.10.26-w157
+globalThis.w157_TOP = "Reservoir-Worker-2026.10.26-w157";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w156";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w157";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3259,7 +3259,7 @@ async function noticesTable(env) {
   }
 }
 // Push notifications. Which kinds of notice also go to people's phones is decided here, once. Anything marked todo (someone has to act) also pushes. To change what pushes, change this list.
-const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request", "policy"];
+const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request", "policy", "dailyops"];
 const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
 const b64uDec = (str) => { const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/"); const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4)); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
@@ -3413,6 +3413,27 @@ async function notify(env, n) {
   } catch (e) { console.log("notify failed", String(e && e.message || e).slice(0, 200)); return null; }
 }
 const noticeOut = (r) => { let data = null; try { data = r.data ? JSON.parse(r.data) : null; } catch (e) { data = null; } return { id: r.id, kind: r.kind || "info", title: r.title || "", body: r.body || "", todo: r.todo === 1, link: r.link || "", data, by: r.by_name || "", createdAt: r.created_at || "", read: !!r.read_at, done: !!r.done_at, doneBy: r.done_by || "", office: r.to_email === "@office" }; };
+// At 10am on a weekday, if any Daily Operations task is still not ticked, tell the directors (T1). One alert a day. The cron runs every 30 minutes, so a run between 10:00 and 12:00 sends it if it has not gone yet.
+async function dailyOpsAlert(env) {
+  const parts = new Intl.DateTimeFormat("en-AU", { timeZone: "Australia/Melbourne", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
+  const get = (t) => (parts.find((x) => x.type === t) || {}).value || "";
+  const mins = (Number(get("hour")) % 24) * 60 + Number(get("minute"));
+  if (["Sat", "Sun"].includes(get("weekday")) || mins < 600 || mins >= 720) return;
+  await todosTable(env);
+  await settingsTable(env);
+  const today = melbourneDay();
+  const sent = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'alert.dailyops'").first();
+  if (sent && sent.value === today) return;
+  const rows = ((await env.DB.prepare("SELECT done, due FROM todo_items WHERE ws = 'Daily Operations' AND due <> '' AND due <= ?").bind(today).all()).results) || [];
+  const todays = rows.filter((r) => r.done !== 1 || r.due === today);
+  const left = todays.filter((r) => r.done !== 1).length;
+  if (!left) return;
+  const tiers = await accessTiers(env);
+  const to = Object.keys(tiers).filter((e) => tiers[e] === "T1");
+  let ok = false;
+  for (const e of to) { const id = await notify(env, { to: e, kind: "dailyops", title: `Daily Operations ${left}/${todays.length} Incomplete`, body: "Open the Action List to see what is left.", link: "todo", by: "Reservoir" }); if (id) ok = true; }
+  if (ok) await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES ('alert.dailyops', ?, 'alert sent', 'Daily Operations alert', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, detail = excluded.detail, at = excluded.at").bind(today).run();
+}
 async function noticesRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/notices")) return null;
   const email = String(user.email || "").toLowerCase();
@@ -4019,6 +4040,7 @@ export default {
     // Every run checks the automatic timesheets and the payroll sweeps. The leave sync keeps its own schedule and is skipped on the half hourly one.
     ctx.waitUntil(tsAutoRun(env).catch((e) => console.log("auto timesheets failed", String(e && e.message || e))));
     ctx.waitUntil(pushFlushHeld(env));
+    ctx.waitUntil(dailyOpsAlert(env).catch((e) => console.log("daily ops alert failed", String(e && e.message || e))));
     ctx.waitUntil(tsResendSalaried(env).catch((e) => console.log("resend salaried failed", String(e && e.message || e))));
     ctx.waitUntil(pushOneOffAndrey(env).catch((e) => console.log("one off failed", String(e && e.message || e))));
     ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
@@ -5684,5 +5706,5 @@ export default {
   }
 };
 
-globalThis.w156_BOTTOM = "Reservoir-Worker-2026.10.26-w156";
-// Reservoir-Worker-2026.10.26-w156
+globalThis.w157_BOTTOM = "Reservoir-Worker-2026.10.26-w157";
+// Reservoir-Worker-2026.10.26-w157
