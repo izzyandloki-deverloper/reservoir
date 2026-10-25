@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.25-w151
-globalThis.w151_TOP = "Reservoir-Worker-2026.10.25-w151";
+// Reservoir-Worker-2026.10.25-w152
+globalThis.w152_TOP = "Reservoir-Worker-2026.10.25-w152";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w151";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.25-w152";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3142,6 +3142,71 @@ async function partnersRoutes(request, env, user, url) {
   }
   return reply(env, 405, { error: "method not allowed" });
 }
+// The Action List. Workspaces (a name and who is in it) and action items live here so they survive reloads and everyone sees the same list. Staff see items assigned to them, items they created, and items in workspaces they belong to. The DFP Team workspace shows staff (T3) only their own items. Only T1 and T2 can edit an item; the person it is assigned to, or who created it, can tick it done.
+let todosReady = false;
+async function todosTable(env) {
+  if (todosReady) return;
+  todosReady = true;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS todo_workspaces (name TEXT PRIMARY KEY, members TEXT NOT NULL DEFAULT '[]', by_name TEXT, created_at TEXT, updated_at TEXT)").run();
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS todo_items (id TEXT PRIMARY KEY, title TEXT NOT NULL, note TEXT, assigned_to TEXT, ws TEXT, due TEXT, repeat TEXT, done INTEGER NOT NULL DEFAULT 0, by_name TEXT, created TEXT, updated_at TEXT)").run();
+}
+async function todosRoutes(request, env, user, url) {
+  const m = url.pathname.match(/^\/api\/todos(?:\/(items|workspaces)\/([^/]{1,80}))?$/);
+  if (!m) return null;
+  await todosTable(env);
+  const me = String(user.name || "").trim().split(/\s+/)[0];
+  const senior = user.tier === "T1" || user.tier === "T2";
+  const firstOf = (n) => String(n || "").trim().split(/\s+/)[0];
+  if (request.method === "GET" && !m[1]) {
+    const ws = ((await env.DB.prepare("SELECT name, members FROM todo_workspaces ORDER BY name COLLATE NOCASE").all()).results) || [];
+    const workspaces = {};
+    for (const w of ws) { let a = []; try { a = JSON.parse(w.members || "[]"); } catch (e) { a = []; } workspaces[w.name] = a; }
+    const rows = ((await env.DB.prepare("SELECT id, title, note, assigned_to, ws, due, repeat, done, by_name, created FROM todo_items ORDER BY created DESC, rowid DESC").all()).results) || [];
+    const items = rows.filter((r) => {
+      const mine = firstOf(r.assigned_to) === me || r.by_name === me;
+      if (mine) return true;
+      if (!r.ws || !(workspaces[r.ws] || []).includes(me)) return false;
+      return r.ws === "DFP Team" ? senior : true;
+    }).map((r) => { let rp = null; try { rp = r.repeat ? JSON.parse(r.repeat) : null; } catch (e) { rp = null; } return { id: r.id, title: r.title, note: r.note || "", assignedTo: r.assigned_to || "", group: r.ws || "", due: r.due || "", importance: "date", repeat: rp, done: r.done === 1, by: r.by_name || "", created: r.created || "" }; });
+    return reply(env, 200, { workspaces, items, worker: WORKER_BUILD });
+  }
+  if (request.method === "PUT" && m[1] === "workspaces") {
+    const name = decodeURIComponent(m[2]).trim().slice(0, 50);
+    let b; try { b = await request.json(); } catch (e) { b = null; }
+    if (!name || !b || !Array.isArray(b.members)) return reply(env, 400, { error: "bad request" });
+    const members = [...new Set(b.members.map((x) => String(x || "").trim().slice(0, 40)).filter(Boolean))].slice(0, 60);
+    const cur = await env.DB.prepare("SELECT members FROM todo_workspaces WHERE name = ?").bind(name).first();
+    let curMembers = []; try { curMembers = cur ? JSON.parse(cur.members || "[]") : []; } catch (e) { curMembers = []; }
+    if (!senior && !(cur && curMembers.includes(me))) return reply(env, 403, { error: "forbidden" });
+    const now = new Date().toISOString();
+    await env.DB.prepare("INSERT INTO todo_workspaces (name, members, by_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET members = excluded.members, updated_at = excluded.updated_at").bind(name, JSON.stringify(members), me, now, now).run();
+    return reply(env, 200, { ok: true });
+  }
+  if (request.method === "PUT" && m[1] === "items") {
+    const id = m[2];
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return reply(env, 400, { error: "bad id" });
+    let b; try { b = await request.json(); } catch (e) { b = null; }
+    if (!b || typeof b !== "object") return reply(env, 400, { error: "bad json" });
+    const cur = await env.DB.prepare("SELECT id, assigned_to, by_name FROM todo_items WHERE id = ?").bind(id).first();
+    const now = new Date().toISOString();
+    if (cur) {
+      const mineItem = firstOf(cur.assigned_to) === me || cur.by_name === me;
+      if (senior && b.title != null) {
+        const rp = b.repeat && b.repeat.type ? JSON.stringify({ type: String(b.repeat.type).slice(0, 10), dow: Number(b.repeat.dow) || 0, dom: Number(b.repeat.dom) || 1 }) : null;
+        await env.DB.prepare("UPDATE todo_items SET title = ?, note = ?, assigned_to = ?, ws = ?, due = ?, repeat = ?, done = ?, updated_at = ? WHERE id = ?").bind(String(b.title || "").trim().slice(0, 60), String(b.note || "").slice(0, 2000), String(b.assignedTo || "").slice(0, 80), String(b.group || "").slice(0, 50), String(b.due || "").slice(0, 10), rp, b.done ? 1 : 0, now, id).run();
+        return reply(env, 200, { ok: true });
+      }
+      if (mineItem || senior) { await env.DB.prepare("UPDATE todo_items SET done = ?, updated_at = ? WHERE id = ?").bind(b.done ? 1 : 0, now, id).run(); return reply(env, 200, { ok: true }); }
+      return reply(env, 403, { error: "forbidden" });
+    }
+    const title = String(b.title || "").trim().slice(0, 60);
+    if (!title) return reply(env, 400, { error: "A title is needed" });
+    const rp = b.repeat && b.repeat.type ? JSON.stringify({ type: String(b.repeat.type).slice(0, 10), dow: Number(b.repeat.dow) || 0, dom: Number(b.repeat.dom) || 1 }) : null;
+    await env.DB.prepare("INSERT INTO todo_items (id, title, note, assigned_to, ws, due, repeat, done, by_name, created, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)").bind(id, title, String(b.note || "").slice(0, 2000), String(b.assignedTo || "").slice(0, 80), String(b.group || "").slice(0, 50), String(b.due || "").slice(0, 10), rp, me, String(b.created || now.slice(0, 10)).slice(0, 10), now).run();
+    return reply(env, 200, { ok: true });
+  }
+  return reply(env, 405, { error: "method not allowed" });
+}
 async function noticesTable(env) {
   if (noticesReady) return;
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, to_email TEXT NOT NULL, kind TEXT, title TEXT, body TEXT, todo INTEGER NOT NULL DEFAULT 0, link TEXT, data TEXT, by_name TEXT, created_at TEXT DEFAULT (datetime('now')), read_at TEXT, done_at TEXT, done_by TEXT)").run();
@@ -3982,6 +4047,8 @@ export default {
     if (reqsReply) return reqsReply;
     const partnersReply = await partnersRoutes(request, env, user, url);
     if (partnersReply) return partnersReply;
+    const todosReply = await todosRoutes(request, env, user, url);
+    if (todosReply) return todosReply;
     const noticesReply = await noticesRoutes(request, env, user, url);
     if (noticesReply) return noticesReply;
     // The app background everyone sees. Any tier can read which one is chosen, only a director (T1) can change it. The pictures themselves are built into the app, so only the name is stored.
@@ -5584,5 +5651,5 @@ export default {
   }
 };
 
-globalThis.w151_BOTTOM = "Reservoir-Worker-2026.10.25-w151";
-// Reservoir-Worker-2026.10.25-w151
+globalThis.w152_BOTTOM = "Reservoir-Worker-2026.10.25-w152";
+// Reservoir-Worker-2026.10.25-w152
