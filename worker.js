@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w158
-globalThis.w158_TOP = "Reservoir-Worker-2026.10.26-w158";
+// Reservoir-Worker-2026.10.26-w159
+globalThis.w159_TOP = "Reservoir-Worker-2026.10.26-w159";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w158";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w159";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -4050,21 +4050,64 @@ async function pushOneOffAndrey(env) {
   const rows = ((await env.DB.prepare("SELECT DISTINCT email FROM push_subs WHERE lower(email) LIKE 'andrey%'").all()).results) || [];
   for (const r of rows) await notify(env, { to: r.email, kind: "timesheet", title: "Submit your timesheet", body: "Please submit your timesheet for this week.", link: "timesheets", by: "Reminder" });
 }
-// Pulls every Xero timesheet into Reservoir (read only). Runs once on Monday from 4:00pm Melbourne, and once as a one off the first tick after w158 goes live. A failed pull is retried on the next tick until 5pm (Monday) or until it works (one off).
-async function tsXeroPullOnce(env, key, label) {
+// Xero contacts, names only. Keeps each contact's Xero ID and name so a repair record can name who the tax invoice is from. Read only, and nothing else about the contact is kept.
+let xeroContactsReady = false;
+async function xeroContactsTable(env) {
+  if (xeroContactsReady) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS xero_contacts (contact_id TEXT PRIMARY KEY, name TEXT NOT NULL, name_lc TEXT NOT NULL, synced_at TEXT)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS xero_contacts_name ON xero_contacts (name_lc)").run();
+  xeroContactsReady = true;
+}
+async function xeroContactsSync(env) {
+  await xeroContactsTable(env);
+  const stamp = new Date().toISOString();
+  const pending = [];
+  let saved = 0;
+  const flush = async () => {
+    while (pending.length) {
+      const group = pending.splice(0, 40);
+      if (typeof env.DB.batch === "function") await env.DB.batch(group);
+      else for (const st of group) await st.run();
+    }
+  };
+  for (let page = 1; page <= 100; page++) {
+    const res = await xeroFetch(env, `api.xro/2.0/Contacts?page=${page}&summaryOnly=true`);
+    if (!res.ok) { await flush(); return { ok: false, saved, error: await xeroWhy(res) }; }
+    const list = (await res.json()).Contacts || [];
+    if (!list.length) break;
+    for (const c of list) {
+      const name = String(c.Name || "").trim().slice(0, 200);
+      if (!c.ContactID || !name) continue;
+      pending.push(env.DB.prepare("INSERT INTO xero_contacts (contact_id, name, name_lc, synced_at) VALUES (?, ?, ?, ?) ON CONFLICT(contact_id) DO UPDATE SET name = excluded.name, name_lc = excluded.name_lc, synced_at = excluded.synced_at").bind(c.ContactID, name, name.toLowerCase(), stamp));
+      saved++;
+    }
+    if (list.length < 100) break;
+  }
+  await flush();
+  // A full read worked, so a contact that is no longer in Xero (archived or deleted) goes from the list too.
+  await env.DB.prepare("DELETE FROM xero_contacts WHERE synced_at IS NULL OR synced_at <> ?").bind(stamp).run();
+  return { ok: true, saved };
+}
+// Runs one Xero pull at most once per key (read only). A failed pull clears its key so the next half hourly tick tries again.
+async function xeroPullOnce(env, key, label, fn) {
   await settingsTable(env);
   const done = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first();
   if (done) return;
   await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES (?, '1', ?, 'Scheduled', datetime('now'))").bind(key, `${label} started`).run();
   let ok = false, note = "";
-  try { const r = await timesheetSync(env); ok = !!(r && r.ok); note = ok ? `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` : `failed: ${String((r && r.error) || "").slice(0, 160)}`; } catch (e) { note = `failed: ${String(e && e.message || e).slice(0, 160)}`; }
+  try { const r = await fn(env); ok = !!(r && r.ok); note = ok ? r.note : `failed: ${String((r && r.error) || "").slice(0, 160)}`; } catch (e) { note = `failed: ${String(e && e.message || e).slice(0, 160)}`; }
   if (ok) await env.DB.prepare("UPDATE app_settings SET detail = ?, at = datetime('now') WHERE key = ?").bind(`${label} ${note}`, key).run();
   else await env.DB.prepare("DELETE FROM app_settings WHERE key = ?").bind(key).run();
 }
+async function tsPullFn(env) { const r = await timesheetSync(env); return r && r.ok ? { ok: true, note: `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` } : { ok: false, error: r && r.error }; }
+async function contactsPullFn(env) { const r = await xeroContactsSync(env); return r.ok ? { ok: true, note: `${r.saved} contacts` } : { ok: false, error: r.error }; }
+// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w159.
 async function tsXeroPullSchedule(env) {
   const now = tsMelbourne(new Date());
-  if (now.date >= "2026-10-26") await tsXeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull");
-  if (now.dow === 1 && now.mins >= 16 * 60 && now.mins < 17 * 60) await tsXeroPullOnce(env, `sweep.ts_pull.${now.date}`, "Monday timesheet pull");
+  if (now.date >= "2026-10-26") await xeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull", tsPullFn);
+  if (now.dow === 1 && now.mins >= 16 * 60 && now.mins < 17 * 60) await xeroPullOnce(env, `sweep.ts_pull.${now.date}`, "Monday timesheet pull", tsPullFn);
+  if (now.date >= "2026-10-26") await xeroPullOnce(env, "oneoff.contacts_pull_20261026", "One off contacts pull", contactsPullFn);
+  if (now.dow >= 1 && now.dow <= 5 && now.mins >= 18 * 60 && now.mins < 19 * 60) await xeroPullOnce(env, `sweep.contacts_pull.${now.date}`, "Weekday contacts pull", contactsPullFn);
 }
 export default {
   // Runs on a Cloudflare cron trigger if one is added (for example Thursday early morning). It only refreshes leave balances and leave history from Xero into D1.
@@ -5447,9 +5490,50 @@ export default {
     }
 
 
+    if (url.pathname === "/api/contacts" && request.method === "GET") {
+      // Xero contact names, searched as the office types. Reads the saved list only, never Xero. T1 and T2 only.
+      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      await xeroContactsTable(env);
+      const q = String(url.searchParams.get("q") || "").trim().toLowerCase().slice(0, 60);
+      if (q.length < 2) return reply(env, 200, { items: [] });
+      const esc = q.replace(/[\\%_]/g, (m) => "\\" + m);
+      const rows = ((await env.DB.prepare("SELECT contact_id, name FROM xero_contacts WHERE name_lc LIKE ? ESCAPE '\\' ORDER BY (name_lc LIKE ? ESCAPE '\\') DESC, name_lc LIMIT 8").bind(`%${esc}%`, `${esc}%`).all()).results) || [];
+      return reply(env, 200, { items: rows.map((r) => ({ id: r.contact_id, name: r.name })) });
+    }
+
+    const rm = url.pathname.match(/^\/api\/fleet\/([A-Za-z0-9_-]{1,64})\/repairs$/);
+    if (rm) {
+      // Repairs and maintenance records on a vehicle. The office adds them (T1 and T2); nothing here edits or removes a record.
+      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS fleet_repairs (id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL, repair_date TEXT NOT NULL, contact_id TEXT, contact_name TEXT, notes TEXT, docs TEXT, created_by TEXT, created_at TEXT DEFAULT (datetime('now')))").run();
+      await env.DB.prepare("CREATE INDEX IF NOT EXISTS fleet_repairs_vehicle ON fleet_repairs (vehicle_id, repair_date)").run();
+      const out = (r) => { let docs = []; try { docs = JSON.parse(r.docs || "[]"); } catch (e) { docs = []; } return { id: r.id, date: r.repair_date, contactId: r.contact_id || "", contactName: r.contact_name || "", notes: r.notes || "", docs, createdBy: r.created_by || "", createdAt: r.created_at || "" }; };
+      if (request.method === "GET") {
+        const rows = ((await env.DB.prepare("SELECT * FROM fleet_repairs WHERE vehicle_id = ? ORDER BY repair_date DESC, created_at DESC LIMIT 200").bind(rm[1]).all()).results) || [];
+        return reply(env, 200, { items: rows.map(out) });
+      }
+      if (request.method === "POST") {
+        const veh = await env.DB.prepare("SELECT rego, name FROM fleet WHERE id = ?").bind(rm[1]).first();
+        if (!veh) return reply(env, 404, { error: "not found", worker: WORKER_BUILD });
+        let body;
+        try { body = await request.json(); } catch (e) { return reply(env, 400, { error: "bad json" }); }
+        const date = String(body.date || "").slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return reply(env, 400, { error: "A date is needed." });
+        const contactName = String(body.contactName || "").trim().slice(0, 200);
+        if (!contactName) return reply(env, 400, { error: "A contact is needed." });
+        const docs = (Array.isArray(body.docs) ? body.docs : []).slice(0, 10).map((d) => ({ id: String(d.id || "").slice(0, 64), name: String(d.name || "").slice(0, 200), itemId: String(d.itemId || "").slice(0, 200), kind: d.kind === "invoice" ? "invoice" : "extra" }));
+        const id = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+        await env.DB.prepare("INSERT INTO fleet_repairs (id, vehicle_id, repair_date, contact_id, contact_name, notes, docs, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, rm[1], date, String(body.contactId || "").slice(0, 64), contactName, String(body.notes || "").slice(0, 2000), JSON.stringify(docs), user.name || "").run();
+        if (user.tier === "T2") { try { await logUpdate(env, user, rm[1], veh.rego || veh.name || rm[1], "Repair Added", { date, url: "", notes: `${contactName}. ${String(body.notes || "").slice(0, 300)}` }); } catch (e) { /* the record is already saved */ } }
+        const row = await env.DB.prepare("SELECT * FROM fleet_repairs WHERE id = ?").bind(id).first();
+        return reply(env, 200, { item: out(row) });
+      }
+      return reply(env, 405, { error: "method not allowed" });
+    }
+
     const dm = url.pathname.match(/^\/api\/fleet\/([A-Za-z0-9_-]{1,64})\/docs$/);
     if (dm && request.method === "POST") {
-      // Upload a document into the vehicle's Service folder, or its Finance folder when folder=Finance. T1 and T2 only.
+      // Upload a document into the vehicle's Service folder, or its Finance or Repairs folder when folder=Finance or folder=Repairs. T1 and T2 only.
       if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
       const row = await env.DB.prepare("SELECT grp, rego, name FROM fleet WHERE id = ?").bind(dm[1]).first();
       if (!row) return reply(env, 404, { error: "not found", worker: WORKER_BUILD });
@@ -5460,7 +5544,7 @@ export default {
       if (!bytes.byteLength) return reply(env, 400, { error: "empty file" });
       if (bytes.byteLength > MAX_UPLOAD) return reply(env, 413, { error: "file too large" });
       try {
-        const item = await uploadToSharePoint(env, ["Fleet Management", row.grp === "Machinery" ? "Machinery" : "Vehicles", label, url.searchParams.get("folder") === "Finance" ? "Finance" : "Service"], fileName, bytes, request.headers.get("Content-Type"), url.searchParams.get("replace") === "1");
+        const item = await uploadToSharePoint(env, ["Fleet Management", row.grp === "Machinery" ? "Machinery" : "Vehicles", label, ({ Finance: "Finance", Repairs: "Repairs" })[url.searchParams.get("folder")] || "Service"], fileName, bytes, request.headers.get("Content-Type"), url.searchParams.get("replace") === "1");
         if (user.tier === "T2") {
           try { await logUpdate(env, user, dm[1], row.rego || row.name || dm[1], "Document Uploaded", { date: new Date().toISOString().slice(0, 10), url: "", notes: item.name || fileName }); } catch (e) { /* upload already succeeded */ }
         }
@@ -5739,5 +5823,5 @@ export default {
   }
 };
 
-globalThis.w158_BOTTOM = "Reservoir-Worker-2026.10.26-w158";
-// Reservoir-Worker-2026.10.26-w158
+globalThis.w159_BOTTOM = "Reservoir-Worker-2026.10.26-w159";
+// Reservoir-Worker-2026.10.26-w159
