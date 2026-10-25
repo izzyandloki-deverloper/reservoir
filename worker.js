@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w157
-globalThis.w157_TOP = "Reservoir-Worker-2026.10.26-w157";
+// Reservoir-Worker-2026.10.26-w158
+globalThis.w158_TOP = "Reservoir-Worker-2026.10.26-w158";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w157";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w158";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3482,6 +3482,20 @@ async function tsOfficeRoute(env, user) {
     .map((p) => ({ email: String(p.email).toLowerCase(), name: String(p.name || p.email) }))
     .sort((a, b) => a.name.localeCompare(b.name));
   const subs = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE status IN ('pending','sent') AND week_start >= ? ORDER BY created_at DESC").bind(tsAddDays(today, -200)).all()).results) || [];
+  // Timesheets the team put in through Xero Me, as last pulled from Xero. Shown for anyone with nothing submitted in Reservoir that week, and only for weeks not yet filed.
+  const xeroBy = new Map();
+  try {
+    await timesheetTable(env);
+    const xs = ((await env.DB.prepare("SELECT id, email, start_date, status, total_hours, lines FROM xero_timesheets WHERE start_date >= ? AND (status IS NULL OR upper(status) NOT IN ('REJECTED','DELETED'))").bind(tsAddDays(today, -200)).all()).results) || [];
+    for (const x of xs) { if (x.email) xeroBy.set(`${String(x.email).toLowerCase()}|${x.start_date}`, x); }
+  } catch (e) { /* the Xero copy is not there yet, the screen shows Reservoir submissions only */ }
+  const xeroCard = (x, who) => {
+    const st = String(x.status || "").toUpperCase();
+    const sums = [0, 0, 0, 0, 0, 0, 0];
+    try { JSON.parse(x.lines || "[]").forEach((l) => (l.units || []).forEach((u, i) => { if (i < 7) sums[i] += Number(u) || 0; })); } catch (e) { /* no day lines */ }
+    const done = st === "APPROVED" || st === "PROCESSED";
+    return { id: `xero:${x.id}`, name: who.name, email: who.email, state: done ? "approved" : "xerodraft", total: Number(x.total_hours) || 0, days: sums.map((h) => ({ ord: h, ot15: 0, ot2: 0 })), auto: done ? "Approved in Xero" : st === "REQUESTED" ? "Submitted in Xero, not approved yet" : "Draft in Xero", error: "" };
+  };
   const latest = new Map();
   for (const r of subs) { const k = `${r.email}|${r.week_start}`; if (!latest.has(k)) latest.set(k, r); }
   const byWeek = new Map();
@@ -3497,17 +3511,19 @@ async function tsOfficeRoute(env, user) {
   const build = (week) => {
     const rows = byWeek.get(week) || [];
     const used = new Set();
-    const cards = staff.map((who) => { const r = rows.find((x) => x.email === who.email); if (r) used.add(r.id); return card(r, who); });
+    const cards = staff.map((who) => { const r = rows.find((x) => x.email === who.email); if (r) used.add(r.id); const xr = !r && xeroBy.get(`${who.email}|${week}`); return xr ? xeroCard(xr, who) : card(r, who); });
     rows.filter((r) => !used.has(r.id)).forEach((r) => cards.push(card(r, { name: r.name || r.email, email: r.email })));
     return { week, weekEnd: tsAddDays(week, 6), payDate: tsAddDays(week, 10), cards };
   };
   const weeks = new Set(byWeek.keys());
+  const xeroWeeks = new Set();
+  for (const k of xeroBy.keys()) { const w = k.split("|")[1]; if (w <= thisMonday && !filed(w)) { weeks.add(w); xeroWeeks.add(w); } }
   weeks.add(lastMonday);
   const active = [], history = [];
   [...weeks].sort().reverse().forEach((w) => {
     if (w > thisMonday) return;
     if (filed(w)) { if (byWeek.has(w)) history.push(build(w)); return; }
-    if (w === thisMonday && !byWeek.has(w)) return;
+    if (w === thisMonday && !byWeek.has(w) && !xeroWeeks.has(w)) return;
     active.push(build(w));
   });
   return reply(env, 200, { active, history, filedEnd, worker: WORKER_BUILD });
@@ -4034,6 +4050,22 @@ async function pushOneOffAndrey(env) {
   const rows = ((await env.DB.prepare("SELECT DISTINCT email FROM push_subs WHERE lower(email) LIKE 'andrey%'").all()).results) || [];
   for (const r of rows) await notify(env, { to: r.email, kind: "timesheet", title: "Submit your timesheet", body: "Please submit your timesheet for this week.", link: "timesheets", by: "Reminder" });
 }
+// Pulls every Xero timesheet into Reservoir (read only). Runs once on Monday from 4:00pm Melbourne, and once as a one off the first tick after w158 goes live. A failed pull is retried on the next tick until 5pm (Monday) or until it works (one off).
+async function tsXeroPullOnce(env, key, label) {
+  await settingsTable(env);
+  const done = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first();
+  if (done) return;
+  await env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES (?, '1', ?, 'Scheduled', datetime('now'))").bind(key, `${label} started`).run();
+  let ok = false, note = "";
+  try { const r = await timesheetSync(env); ok = !!(r && r.ok); note = ok ? `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` : `failed: ${String((r && r.error) || "").slice(0, 160)}`; } catch (e) { note = `failed: ${String(e && e.message || e).slice(0, 160)}`; }
+  if (ok) await env.DB.prepare("UPDATE app_settings SET detail = ?, at = datetime('now') WHERE key = ?").bind(`${label} ${note}`, key).run();
+  else await env.DB.prepare("DELETE FROM app_settings WHERE key = ?").bind(key).run();
+}
+async function tsXeroPullSchedule(env) {
+  const now = tsMelbourne(new Date());
+  if (now.date >= "2026-10-26") await tsXeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull");
+  if (now.dow === 1 && now.mins >= 16 * 60 && now.mins < 17 * 60) await tsXeroPullOnce(env, `sweep.ts_pull.${now.date}`, "Monday timesheet pull");
+}
 export default {
   // Runs on a Cloudflare cron trigger if one is added (for example Thursday early morning). It only refreshes leave balances and leave history from Xero into D1.
   async scheduled(event, env, ctx) {
@@ -4042,6 +4074,7 @@ export default {
     ctx.waitUntil(pushFlushHeld(env));
     ctx.waitUntil(dailyOpsAlert(env).catch((e) => console.log("daily ops alert failed", String(e && e.message || e))));
     ctx.waitUntil(tsResendSalaried(env).catch((e) => console.log("resend salaried failed", String(e && e.message || e))));
+    ctx.waitUntil(tsXeroPullSchedule(env).catch((e) => console.log("timesheet pull failed", String(e && e.message || e))));
     ctx.waitUntil(pushOneOffAndrey(env).catch((e) => console.log("one off failed", String(e && e.message || e))));
     ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
     if (event && event.cron === "*/30 * * * *") return;
@@ -5706,5 +5739,5 @@ export default {
   }
 };
 
-globalThis.w157_BOTTOM = "Reservoir-Worker-2026.10.26-w157";
-// Reservoir-Worker-2026.10.26-w157
+globalThis.w158_BOTTOM = "Reservoir-Worker-2026.10.26-w158";
+// Reservoir-Worker-2026.10.26-w158
