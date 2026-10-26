@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w161
-globalThis.w161_TOP = "Reservoir-Worker-2026.10.26-w161";
+// Reservoir-Worker-2026.10.26-w162
+globalThis.w162_TOP = "Reservoir-Worker-2026.10.26-w162";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w161";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w162";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -4109,7 +4109,7 @@ async function xeroPullOnce(env, key, label, fn) {
 }
 async function tsPullFn(env) { const r = await timesheetSync(env); return r && r.ok ? { ok: true, note: `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` } : { ok: false, error: r && r.error }; }
 async function contactsPullFn(env) { const r = await xeroContactsSync(env); return r.ok ? { ok: true, note: `${r.saved} contacts` } : { ok: false, error: r.error }; }
-// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w161.
+// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w162.
 async function tsXeroPullSchedule(env) {
   const now = tsMelbourne(new Date());
   if (now.date >= "2026-10-26") await xeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull", tsPullFn);
@@ -5539,6 +5539,51 @@ export default {
       return reply(env, 405, { error: "method not allowed" });
     }
 
+    const tm = url.pathname.match(/^\/api\/fleet\/([A-Za-z0-9_-]{1,64})\/tools$/);
+    if (tm) {
+      // The Vehicle Tools check. Whoever takes in a vehicle ticks off what is on it; each save is kept, so the next swap can be compared with the last.
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS vehicle_tool_items (id INTEGER PRIMARY KEY AUTOINCREMENT, grp TEXT NOT NULL, item TEXT NOT NULL, spec TEXT, sort INTEGER, active INTEGER DEFAULT 1)").run();
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS vehicle_tool_checks (id TEXT PRIMARY KEY, vehicle_id TEXT NOT NULL, checked_by TEXT, checked_at TEXT DEFAULT (datetime('now')), missing_count INTEGER, notes TEXT, results TEXT)").run();
+      await env.DB.prepare("CREATE INDEX IF NOT EXISTS vehicle_tool_checks_v ON vehicle_tool_checks (vehicle_id, checked_at)").run();
+      const have = await env.DB.prepare("SELECT COUNT(*) AS n FROM vehicle_tool_items").first();
+      if (!have || !have.n) {
+        const seed = [["Company Tool", "Extension ladder", ""], ["Company Tool", "A-frame ladders", "Small and medium"], ["Company Tool", "Extractor fans", "2 units"], ["Company Tool", "SDS drill-bit set", "5 mm, 6.5 mm, 8 mm and 25 mm"], ["Company Tool", "Impact drill-bit set", "Phillips head, hex bits 5/16 and 3/8, and spade bits"], ["Company Tool", "Hole-saw kit", ""], ["Company Tool", "Gas manometer", ""], ["Company Tool", "Bucket pump", ""], ["Company Tool", "Water-pressure gauge and thermometer", ""], ["Company Tool", "String lines", ""], ["Company Tool", "Ratchet straps", ""], ["Company Tool", "30 m tape measure", ""], ["Company Tool", "B-press tool", ""], ["Company Tool", "Shovels", ""], ["Company Tool", "Probe", ""], ["Company Tool", "Broom, dustpan and brush", ""], ["Vehicle Supply", "First-aid kit", "Check expiry dates and restock after use"], ["Vehicle Supply", "Disposable gloves", ""], ["Vehicle Supply", "Safety glasses", ""], ["Vehicle Supply", "Dust masks", ""], ["Vehicle Supply", "Hearing protection", "Ear muffs"], ["Vehicle Supply", "Vehicle-cleaning products", ""]];
+        for (let i = 0; i < seed.length; i++) await env.DB.prepare("INSERT INTO vehicle_tool_items (grp, item, spec, sort) VALUES (?, ?, ?, ?)").bind(seed[i][0], seed[i][1], seed[i][2], i).run();
+      }
+      const lastOf = async () => {
+        const r = await env.DB.prepare("SELECT * FROM vehicle_tool_checks WHERE vehicle_id = ? ORDER BY checked_at DESC, rowid DESC LIMIT 1").bind(tm[1]).first();
+        if (!r) return null;
+        let results = []; try { results = JSON.parse(r.results || "[]"); } catch (e) { results = []; }
+        return { id: r.id, at: String(r.checked_at || "").slice(0, 10), by: r.checked_by || "", missing: results.filter((x) => !x.present).map((x) => x.item), missingCount: r.missing_count || 0, notes: r.notes || "" };
+      };
+      if (request.method === "GET") {
+        const rows = ((await env.DB.prepare("SELECT id, grp, item, spec FROM vehicle_tool_items WHERE active = 1 ORDER BY sort, id").all()).results) || [];
+        return reply(env, 200, { items: rows.map((r) => ({ id: r.id, group: r.grp, item: r.item, spec: r.spec || "" })), last: await lastOf() });
+      }
+      if (request.method === "POST") {
+        const veh = await env.DB.prepare("SELECT rego, name FROM fleet WHERE id = ?").bind(tm[1]).first();
+        if (!veh) return reply(env, 404, { error: "not found", worker: WORKER_BUILD });
+        let body;
+        try { body = await request.json(); } catch (e) { return reply(env, 400, { error: "bad json" }); }
+        const rows = ((await env.DB.prepare("SELECT id, grp, item FROM vehicle_tool_items WHERE active = 1 ORDER BY sort, id").all()).results) || [];
+        const present = new Set((Array.isArray(body.present) ? body.present : []).map((x) => Number(x)));
+        const results = rows.map((r) => ({ id: r.id, group: r.grp, item: r.item, present: present.has(r.id) }));
+        const missing = results.filter((x) => !x.present);
+        const id = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+        const notes = String(body.notes || "").slice(0, 2000);
+        await env.DB.prepare("INSERT INTO vehicle_tool_checks (id, vehicle_id, checked_by, missing_count, notes, results) VALUES (?, ?, ?, ?, ?, ?)").bind(id, tm[1], user.name || "", missing.length, notes, JSON.stringify(results)).run();
+        if (missing.length) {
+          try {
+            const tiers = await accessTiers(env);
+            const label = veh.rego || veh.name || tm[1];
+            for (const e of Object.keys(tiers).filter((k) => tiers[k] === "T1")) await notify(env, { to: e, kind: "toolcheck", title: `${label} Tools Missing`, body: `${missing.length} missing: ${missing.map((x) => x.item).join(", ").slice(0, 300)}`, link: "", by: user.name || "Reservoir" });
+          } catch (e) { /* the check is already saved */ }
+        }
+        return reply(env, 200, { last: await lastOf() });
+      }
+      return reply(env, 405, { error: "method not allowed" });
+    }
+
     const dm = url.pathname.match(/^\/api\/fleet\/([A-Za-z0-9_-]{1,64})\/docs$/);
     if (dm && request.method === "POST") {
       // Upload a document into the vehicle's Service folder, or its Finance or Repairs folder when folder=Finance or folder=Repairs. T1 and T2 only.
@@ -5831,5 +5876,5 @@ export default {
   }
 };
 
-globalThis.w161_BOTTOM = "Reservoir-Worker-2026.10.26-w161";
-// Reservoir-Worker-2026.10.26-w161
+globalThis.w162_BOTTOM = "Reservoir-Worker-2026.10.26-w162";
+// Reservoir-Worker-2026.10.26-w162
