@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w160
-globalThis.w160_TOP = "Reservoir-Worker-2026.10.26-w160";
+// Reservoir-Worker-2026.10.26-w161
+globalThis.w161_TOP = "Reservoir-Worker-2026.10.26-w161";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w160";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w161";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3530,7 +3530,7 @@ async function tsOfficeRoute(env, user) {
   const active = [], history = [];
   [...weeks].sort().reverse().forEach((w) => {
     if (w > thisMonday) return;
-    if (filed(w)) { if (byWeek.has(w)) history.push(build(w)); return; }
+    if (filed(w)) return; // once a pay run is filed its weeks leave this screen
     if (w === thisMonday && !byWeek.has(w) && !xeroWeeks.has(w)) return;
     active.push(build(w));
   });
@@ -4109,7 +4109,7 @@ async function xeroPullOnce(env, key, label, fn) {
 }
 async function tsPullFn(env) { const r = await timesheetSync(env); return r && r.ok ? { ok: true, note: `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` } : { ok: false, error: r && r.error }; }
 async function contactsPullFn(env) { const r = await xeroContactsSync(env); return r.ok ? { ok: true, note: `${r.saved} contacts` } : { ok: false, error: r.error }; }
-// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w160.
+// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w161.
 async function tsXeroPullSchedule(env) {
   const now = tsMelbourne(new Date());
   if (now.date >= "2026-10-26") await xeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull", tsPullFn);
@@ -5831,5 +5831,5 @@ export default {
   }
 };
 
-globalThis.w160_BOTTOM = "Reservoir-Worker-2026.10.26-w160";
-// Reservoir-Worker-2026.10.26-w160
+globalThis.w161_BOTTOM = "Reservoir-Worker-2026.10.26-w161";
+// Reservoir-Worker-2026.10.26-w161
