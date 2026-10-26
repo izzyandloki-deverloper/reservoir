@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w159
-globalThis.w159_TOP = "Reservoir-Worker-2026.10.26-w159";
+// Reservoir-Worker-2026.10.26-w160
+globalThis.w160_TOP = "Reservoir-Worker-2026.10.26-w160";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w159";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w160";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3477,9 +3477,9 @@ async function tsOfficeRoute(env, user) {
     const r = await env.DB.prepare("SELECT MAX(period_end) AS e FROM payslip_runs WHERE filed = 1").first();
     filedEnd = (r && r.e) ? String(r.e).slice(0, 10) : "";
   } catch (e) { filedEnd = ""; }
-  const staff = (((await env.DB.prepare("SELECT employee_id, email, name FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE')").all()).results) || [])
+  const staff = (((await env.DB.prepare("SELECT employee_id, email, name, employment_basis FROM xero_payroll WHERE email IS NOT NULL AND email <> '' AND (status IS NULL OR status = 'ACTIVE')").all()).results) || [])
     .filter((p) => !/andrew\s+wowk/i.test(String(p.name || "")))
-    .map((p) => ({ email: String(p.email).toLowerCase(), name: String(p.name || p.email) }))
+    .map((p) => ({ email: String(p.email).toLowerCase(), name: String(p.name || p.email), casual: /casual/i.test(String(p.employment_basis || "")) }))
     .sort((a, b) => a.name.localeCompare(b.name));
   const subs = ((await env.DB.prepare("SELECT * FROM timesheet_submissions WHERE status IN ('pending','sent') AND week_start >= ? ORDER BY created_at DESC").bind(tsAddDays(today, -200)).all()).results) || [];
   // Timesheets the team put in through Xero Me, as last pulled from Xero. Shown for anyone with nothing submitted in Reservoir that week, and only for weeks not yet filed.
@@ -3511,7 +3511,15 @@ async function tsOfficeRoute(env, user) {
   const build = (week) => {
     const rows = byWeek.get(week) || [];
     const used = new Set();
-    const cards = staff.map((who) => { const r = rows.find((x) => x.email === who.email); if (r) used.add(r.id); const xr = !r && xeroBy.get(`${who.email}|${week}`); return xr ? xeroCard(xr, who) : card(r, who); });
+    // Casual staff are left off until they have a timesheet that week. Everyone else shows by their Xero name, so a name saved on an old submission never differs from the rest.
+    const cards = [];
+    for (const who of staff) {
+      const r = rows.find((x) => x.email === who.email);
+      if (r) used.add(r.id);
+      const xr = !r && xeroBy.get(`${who.email}|${week}`);
+      if (!r && !xr && who.casual) continue;
+      cards.push({ ...(xr ? xeroCard(xr, who) : card(r, who)), name: who.name });
+    }
     rows.filter((r) => !used.has(r.id)).forEach((r) => cards.push(card(r, { name: r.name || r.email, email: r.email })));
     return { week, weekEnd: tsAddDays(week, 6), payDate: tsAddDays(week, 10), cards };
   };
@@ -4101,7 +4109,7 @@ async function xeroPullOnce(env, key, label, fn) {
 }
 async function tsPullFn(env) { const r = await timesheetSync(env); return r && r.ok ? { ok: true, note: `pulled ${r.saved || 0} timesheets, ${r.people || 0} people, ${JSON.stringify(r.byStatus || {})}` } : { ok: false, error: r && r.error }; }
 async function contactsPullFn(env) { const r = await xeroContactsSync(env); return r.ok ? { ok: true, note: `${r.saved} contacts` } : { ok: false, error: r.error }; }
-// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w159.
+// Timesheets: Monday from 4:00pm Melbourne, and once as a one off after w158. Contacts: every weekday from 6:00pm Melbourne, and once as a one off after w160.
 async function tsXeroPullSchedule(env) {
   const now = tsMelbourne(new Date());
   if (now.date >= "2026-10-26") await xeroPullOnce(env, "oneoff.ts_pull_20261026", "One off timesheet pull", tsPullFn);
@@ -5823,5 +5831,5 @@ export default {
   }
 };
 
-globalThis.w159_BOTTOM = "Reservoir-Worker-2026.10.26-w159";
-// Reservoir-Worker-2026.10.26-w159
+globalThis.w160_BOTTOM = "Reservoir-Worker-2026.10.26-w160";
+// Reservoir-Worker-2026.10.26-w160
