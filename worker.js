@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.26-w163
-globalThis.w163_TOP = "Reservoir-Worker-2026.10.26-w163";
+// Reservoir-Worker-2026.10.28-w164
+globalThis.w164_TOP = "Reservoir-Worker-2026.10.28-w164";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.26-w163";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w164";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -4160,14 +4160,14 @@ export default {
 
     const url = new URL(request.url);
 
-    // View As. Only a real director (T1) can send this header. The request then runs as the person named in it, at the access level the app sent. Everything is read only except Leave.
+    // View As. Only a real director (T1) can send this header. The request then runs as the person named in it, at the access level the app sent. Everything is read only, with no exceptions.
     const viewHeader = request.headers.get("X-View-As");
     if (viewHeader) {
       if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
       let v;
       try { v = JSON.parse(decodeURIComponent(viewHeader)); } catch (e) { v = null; }
       if (!v || !v.e || !["T1", "T2", "T3"].includes(v.t)) return reply(env, 400, { error: "bad view as" });
-      if (request.method !== "GET" && !url.pathname.startsWith("/api/leave")) return reply(env, 403, { error: "Viewing as someone else is read only, apart from Leave." });
+      if (request.method !== "GET") return reply(env, 403, { error: "Viewing as someone else is read only." });
       console.log("view as", user.email, "->", String(v.e).toLowerCase(), v.t);
       user = { tier: v.t, name: String(v.n || ""), email: String(v.e).toLowerCase(), viewAs: true, realUser: user };
     }
@@ -5696,8 +5696,19 @@ export default {
         const status = ["sent", "submitted"].includes(body.status) ? body.status : (type === "company" ? "sent" : "submitted");
         const view = typeof body.view === "string" && body.view.startsWith("data:image/") && body.view.length < 400000 ? body.view : "";
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? body.date : today;
-        await env.DB.prepare("INSERT OR IGNORE INTO receipt_records (id, by_name, by_email, type, amount, note, item_id, file_name, status, view, sent_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(id, first, mail, type, type === "reimbursement" ? txt(body.amount, 12) : "", txt(body.text, 500), txt(body.itemId, 200), txt(body.fileName, 200), status, view, date).run();
+        // A director (never while viewing as someone) can add a reimbursement on behalf of a team member. It is filed under that person, so it shows in their own history, and it can go in already processed.
+        let byName = first, byMail = mail, rowStatus = status, doneOn = "";
+        const forMail = String(body.forEmail || "").trim().toLowerCase();
+        if (forMail && forMail !== mail) {
+          if (user.tier !== "T1" || user.viewAs || type !== "reimbursement") return reply(env, 403, { error: "forbidden" });
+          const person = await env.DB.prepare("SELECT name FROM dfp_xero WHERE lower(email) = ?").bind(forMail).first();
+          if (!person || !person.name) return reply(env, 400, { error: "That team member was not found" });
+          byName = String(person.name).split(" ")[0];
+          byMail = forMail;
+        }
+        if (type === "reimbursement" && body.status === "paid" && user.tier === "T1") { rowStatus = "paid"; doneOn = date; }
+        await env.DB.prepare("INSERT OR IGNORE INTO receipt_records (id, by_name, by_email, type, amount, note, item_id, file_name, status, view, sent_date, done_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(id, byName, byMail, type, type === "reimbursement" ? txt(body.amount, 12) : "", txt(body.text, 500), txt(body.itemId, 200), txt(body.fileName, 200), rowStatus, view, date, doneOn).run();
         return reply(env, 200, { ok: true });
       }
       if (request.method === "POST" && rrm[1]) {
@@ -5877,5 +5888,5 @@ export default {
   }
 };
 
-globalThis.w163_BOTTOM = "Reservoir-Worker-2026.10.26-w163";
-// Reservoir-Worker-2026.10.26-w163
+globalThis.w164_BOTTOM = "Reservoir-Worker-2026.10.28-w164";
+// Reservoir-Worker-2026.10.28-w164
