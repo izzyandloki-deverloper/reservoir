@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w176
-globalThis.w176_TOP = "Reservoir-Worker-2026.10.28-w176";
+// Reservoir-Worker-2026.10.28-w177
+globalThis.w177_TOP = "Reservoir-Worker-2026.10.28-w177";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w176";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w177";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2877,18 +2877,15 @@ async function arofloRoutes(request, env, user, url) {
         const html = "<p>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br />") + "</p>";
         const nb = { content: html, visibility: "INTERNAL_ONLY" };
         const bulk = `${coll}/${enc}/notes/bulk`;
-        const tries = [
-          ["bulk list of content and visibility", bulk, "POST", { taskNotes: [nb] }],
-          ["bulk list of content", bulk, "POST", { taskNotes: [{ content: html }] }],
-          ["bulk list of plain text content", bulk, "POST", { taskNotes: [{ content: text, visibility: "INTERNAL_ONLY" }] }],
-          ["bulk list of note", bulk, "POST", { taskNotes: [{ note: html, visibility: "INTERNAL_ONLY" }] }],
-          ["bulk list of text", bulk, "POST", { taskNotes: [{ text, visibility: "INTERNAL_ONLY" }] }],
-          ["bulk single object", bulk, "POST", { taskNotes: nb }],
-          ["bulk string", bulk, "POST", { taskNotes: html }],
-          ["bulk list of strings", bulk, "POST", { taskNotes: [html] }],
-          ["bulk list with visibility lower case", bulk, "POST", { taskNotes: [{ content: html, visibility: "internal_only" }] }],
-          ["bulk list with name", bulk, "POST", { taskNotes: [{ name: "Reservoir", content: html, visibility: "INTERNAL_ONLY" }] }]
-        ];
+        // AroFlo says each item needs a "filter". Documents use documentFilter INTERNAL_ONLY, so the note filter is most likely who can see it.
+        const tries = [];
+        for (const f of ["INTERNAL_ONLY", "INTERNAL", "PUBLIC", "EXTERNAL", "CLIENT", "ALL"]) tries.push([`bulk filter ${f}`, bulk, "POST", { taskNotes: [{ content: html, filter: f }] }]);
+        tries.push(["bulk filter as the task id", bulk, "POST", { taskNotes: [{ content: html, filter: id }] }]);
+        tries.push(["bulk filter object with task id", bulk, "POST", { taskNotes: [{ content: html, filter: { taskId: id } }] }]);
+        tries.push(["bulk filter object with id", bulk, "POST", { taskNotes: [{ content: html, filter: { id } }] }]);
+        tries.push(["bulk filter object with visibility", bulk, "POST", { taskNotes: [{ content: html, filter: { visibility: "INTERNAL_ONLY" } }] }]);
+        tries.push(["bulk filter with task id in the item", bulk, "POST", { taskNotes: [{ taskId: id, content: html, filter: "INTERNAL_ONLY" }] }]);
+        tries.push(["bulk filter with id in the item", bulk, "POST", { taskNotes: [{ id, content: html, filter: "INTERNAL_ONLY" }] }]);
         for (const [lab, p, m, b] of tries) { if (ok) break; ok = await tryIt(`note, ${lab}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
       } else {
         const type = request.headers.get("Content-Type") || "image/jpeg";
@@ -6150,5 +6147,5 @@ export default {
   }
 };
 
-globalThis.w176_BOTTOM = "Reservoir-Worker-2026.10.28-w176";
-// Reservoir-Worker-2026.10.28-w176
+globalThis.w177_BOTTOM = "Reservoir-Worker-2026.10.28-w177";
+// Reservoir-Worker-2026.10.28-w177
