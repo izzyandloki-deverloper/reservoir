@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w168
-globalThis.w168_TOP = "Reservoir-Worker-2026.10.28-w168";
+// Reservoir-Worker-2026.10.28-w169
+globalThis.w169_TOP = "Reservoir-Worker-2026.10.28-w169";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w168";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w169";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2939,6 +2939,22 @@ async function arofloRoutes(request, env, user, url) {
       const top = rows.slice(0, 10).map((x) => ({ id: String((x.rec && (x.rec.id ?? x.rec.projectId ?? x.rec.ID)) ?? x.shape.number ?? x.i), number: x.shape.number, client: x.shape.client, address: x.shape.address, when: x.shape.when, fields: arofloFlat(x.rec, "", [], 0) }));
       return reply(env, 200, { ok: true, status: r.status, total: list.length, orderedBy, steps, meta, lastPage, items: top, worker: WORKER_BUILD });
     }
+    // A file from AroFlo's document store (a photo or a document), passed through so the app can show it. Directors only, read only.
+    if (url.pathname === "/api/aroflo/file") {
+      const p = String(url.searchParams.get("path") || "");
+      if (!/^\/DocStorage\/[A-Za-z0-9_-]{4,80}$/.test(p)) return reply(env, 400, { error: "bad path" });
+      const tried = [];
+      for (const base of [AROFLO_BASE, "https://api.aroflo.com", "https://app.aroflo.com"]) {
+        try {
+          const res = await fetch(base + p, { headers: { Authorization: "Bearer " + env.AROFLO_TOKEN }, redirect: "follow" });
+          tried.push(`${base}${p} answered ${res.status}`);
+          const ct = res.headers.get("content-type") || "";
+          if (res.ok && !/text\/html|application\/json/i.test(ct)) return new Response(res.body, { status: 200, headers: { "Content-Type": ct || "application/octet-stream", "Cache-Control": "private, max-age=300", ...cors(env) } });
+          if (res.ok) tried.push(`it was ${ct}, not a file`);
+        } catch (e) { tried.push(`${base} failed`); }
+      }
+      return reply(env, 502, { error: "AroFlo would not give that file", tried });
+    }
     // One job by its number: client, site address, then its notes and its documents. Read only. AroFlo's v2 paths are not published, so each possible path is tried and what AroFlo answered is reported.
     if (url.pathname === "/api/aroflo/job") {
       const want = String(url.searchParams.get("number") || "").trim();
@@ -2991,8 +3007,14 @@ async function arofloRoutes(request, env, user, url) {
         const r = await arofloGet(env, `${coll}/${encodeURIComponent(id)}/${seg}`);
         const list = r.ok ? arofloList(r.json) : null;
         steps.push(`${coll}/${id}/${seg} answered ${r.status}${list ? `, ${list.length} items` : r.ok ? ", no list" : ""}`);
-        if (list) subs[seg] = list.slice(0, 50).map((it) => { const flat = arofloFlat(it, "", [], 0); const bodyGuess = flat.filter(([k, v]) => !/(^|\.)(id|.*id|.*date|.*time|.*type|.*by|visibility|.*status)$/i.test(k) && String(v).length > 3).sort((a, b) => String(b[1]).length - String(a[1]).length)[0];
-        return { text: bodyGuess ? String(bodyGuess[1]) : "", by: pick(flat, /(user|author|createdby|by|name)/i, /(file|note|doc)/i), when: pick(flat, /(date|created|when|time)/i), name: pick(flat, /(file.*name|name|title)/i), url: pick(flat, /(url|link|href)/i), fields: flat.slice(0, 30) }; });
+        if (list) subs[seg] = list.slice(0, 50).map((it) => {
+          const flat = arofloFlat(it, "", [], 0);
+          const get = (re) => { const f = flat.find(([k, v]) => re.test(k) && v !== "" && v !== "(empty list)"); return f ? String(f[1]) : ""; };
+          const person = (pre) => [get(new RegExp(`${pre}.*givenName$`, "i")), get(new RegExp(`${pre}.*familyName$`, "i"))].filter(Boolean).join(" ");
+          const plain = (h) => String(h || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>\s*<p[^>]*>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\n{3,}/g, "\n\n").trim();
+          if (seg === "notes") return { text: plain(get(/(^|\.)content$/i)), by: person("postedBy"), when: get(/(timestampCreated|created)/i), fields: [] };
+          return { name: get(/(^|\.)displayName$/i) || get(/(^|\.)name$/i), fileName: get(/(^|\.)fileName$/i), by: person("insertedByUser"), when: get(/datetimeInserted/i), original: get(/(^|\.)original$/i), thumbnail: get(/(^|\.)thumbnail$/i), type: get(/documentType/i), size: Number(get(/fileSizeBytes/i)) || 0, fields: [] };
+        });
       }
       return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: bestName ? String(bestName[1]) : shape.client, address: siteAddress || shape.address, fields: jobFlat.slice(0, 120), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
     }
@@ -6016,5 +6038,5 @@ export default {
   }
 };
 
-globalThis.w168_BOTTOM = "Reservoir-Worker-2026.10.28-w168";
-// Reservoir-Worker-2026.10.28-w168
+globalThis.w169_BOTTOM = "Reservoir-Worker-2026.10.28-w169";
+// Reservoir-Worker-2026.10.28-w169
