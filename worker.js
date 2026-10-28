@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w167
-globalThis.w167_TOP = "Reservoir-Worker-2026.10.28-w167";
+// Reservoir-Worker-2026.10.28-w168
+globalThis.w168_TOP = "Reservoir-Worker-2026.10.28-w168";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w167";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w168";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2970,15 +2970,31 @@ async function arofloRoutes(request, env, user, url) {
       }
       if (!rec) return reply(env, 200, { ok: false, steps, worker: WORKER_BUILD });
       const shape = arofloShape(rec);
+      const jobFlat = arofloFlat(rec, "", [], 0);
+      // The client's full name, not its short name or code.
+      const nameKeys = jobFlat.filter(([k, v]) => /(client|customer|organi[sz]ation|company)/i.test(k) && /name/i.test(k) && !/(short|code|ref|(^|\.)id$|contact|email|phone|address|nick|abbrev)/i.test(k) && v !== "" && v !== "(empty list)");
+      const bestName = nameKeys.find(([k]) => /(legal|full|trading|company|organi[sz]ation).*name|(^|\.)name$/i.test(k)) || nameKeys.sort((a, b) => String(b[1]).length - String(a[1]).length)[0];
+      // The site address put in street, suburb, state, postcode order, from whichever group of fields looks like the site.
+      const addrParts = jobFlat.filter(([k, v]) => /(address|street|suburb|city|town|locality|state|postcode|post_code|zip|line1|line2|unit|lot)/i.test(k) && !/(client|customer|billing|email|phone|contact|org)/i.test(k) && v !== "" && v !== "(empty list)");
+      const groups = {};
+      addrParts.forEach(([k, v]) => { const g = k.includes(".") ? k.slice(0, k.lastIndexOf(".")) : ""; (groups[g] = groups[g] || []).push([k.slice(k.lastIndexOf(".") + 1), String(v)]); });
+      const gNames = Object.keys(groups).sort((a, b) => (/(site|location|job|task|project)/i.test(b) ? 1 : 0) - (/(site|location|job|task|project)/i.test(a) ? 1 : 0) || groups[b].length - groups[a].length);
+      let siteAddress = "";
+      if (gNames.length) {
+        const g = groups[gNames[0]];
+        const rank = (n) => /(line1|address1|street|^address$|unit|lot)/i.test(n) ? 1 : /line2|address2/i.test(n) ? 2 : /(suburb|city|town|locality)/i.test(n) ? 3 : /state/i.test(n) ? 4 : /(post|zip)/i.test(n) ? 5 : 6;
+        siteAddress = Array.from(new Set(g.sort((a, b) => rank(a[0]) - rank(b[0])).map((x) => x[1]))).join(", ");
+      }
       const pick = (flat, re, skip) => { const f = flat.find(([k, v]) => re.test(k) && !(skip && skip.test(k)) && v !== "" && v !== "(empty list)"); return f ? String(f[1]) : ""; };
       const subs = {};
       for (const seg of ["notes", "documents", "attachments", "files", "photos"]) {
         const r = await arofloGet(env, `${coll}/${encodeURIComponent(id)}/${seg}`);
         const list = r.ok ? arofloList(r.json) : null;
         steps.push(`${coll}/${id}/${seg} answered ${r.status}${list ? `, ${list.length} items` : r.ok ? ", no list" : ""}`);
-        if (list) subs[seg] = list.slice(0, 50).map((it) => { const flat = arofloFlat(it, "", [], 0); return { text: pick(flat, /(note|text|body|comment|message|content|description)/i, /(id|by|date|time)$/i), by: pick(flat, /(user|author|createdby|by|name)/i, /(file|note|doc)/i), when: pick(flat, /(date|created|when|time)/i), name: pick(flat, /(file.*name|name|title)/i), url: pick(flat, /(url|link|href)/i), fields: flat.slice(0, 14) }; });
+        if (list) subs[seg] = list.slice(0, 50).map((it) => { const flat = arofloFlat(it, "", [], 0); const bodyGuess = flat.filter(([k, v]) => !/(^|\.)(id|.*id|.*date|.*time|.*type|.*by|visibility|.*status)$/i.test(k) && String(v).length > 3).sort((a, b) => String(b[1]).length - String(a[1]).length)[0];
+        return { text: bodyGuess ? String(bodyGuess[1]) : "", by: pick(flat, /(user|author|createdby|by|name)/i, /(file|note|doc)/i), when: pick(flat, /(date|created|when|time)/i), name: pick(flat, /(file.*name|name|title)/i), url: pick(flat, /(url|link|href)/i), fields: flat.slice(0, 30) }; });
       }
-      return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: shape.client, address: shape.address, fields: arofloFlat(rec, "", [], 0).slice(0, 60), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
+      return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: bestName ? String(bestName[1]) : shape.client, address: siteAddress || shape.address, fields: jobFlat.slice(0, 120), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
     }
     // One project pulled raw. Lists every field AroFlo sends for it.
     if (url.pathname === "/api/aroflo/project") {
@@ -6000,5 +6016,5 @@ export default {
   }
 };
 
-globalThis.w167_BOTTOM = "Reservoir-Worker-2026.10.28-w167";
-// Reservoir-Worker-2026.10.28-w167
+globalThis.w168_BOTTOM = "Reservoir-Worker-2026.10.28-w168";
+// Reservoir-Worker-2026.10.28-w168
