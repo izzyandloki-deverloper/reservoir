@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w172
-globalThis.w172_TOP = "Reservoir-Worker-2026.10.28-w172";
+// Reservoir-Worker-2026.10.28-w173
+globalThis.w173_TOP = "Reservoir-Worker-2026.10.28-w173";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w172";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w173";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2868,49 +2868,51 @@ async function arofloRoutes(request, env, user, url) {
       const probe = isNote ? [`${coll}/${enc}/notes`, `/notes`, `${coll}/${enc}`] : [`${coll}/${enc}/documents`, `/documents`, `${coll}/${enc}`];
       for (const p of probe) await send2("options", p, { method: "OPTIONS" });
       const J = { "Content-Type": "application/json" };
+      // A write only counts when the job shows it afterwards, because AroFlo answers 204 even when it ignores the body.
+      const listPath = isNote ? `${coll}/${enc}/notes` : `${coll}/${enc}/documents`;
+      const marker = isNote ? text.slice(0, 24) : name.replace(/\.[^.]*$/, "");
+      const shows = async () => { const g = await arofloGet(env, listPath); const hit = !!(g.ok && JSON.stringify(g.json || g.text || "").includes(marker)); attempts.push({ label: "check the job", path: listPath, status: g.status, body: hit ? "It is on the job." : "Not on the job." }); return hit; };
+      const tryIt = async (label, path, init) => { const r = await send2(label, path, init); if (!r) return false; return await shows(); };
       if (isNote) {
         const html = "<p>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br />") + "</p>";
         const nb = { content: html, visibility: "INTERNAL_ONLY" };
         const tries = [
-          ["PUT notes", `${coll}/${enc}/notes`, "PUT", nb],
-          ["PATCH notes", `${coll}/${enc}/notes`, "PATCH", nb],
-          ["POST notes with parent", `/notes`, "POST", { ...nb, taskId: id, parentId: id, parentType: "TASK" }],
-          ["POST note singular", `${coll}/${enc}/note`, "POST", nb],
-          ["POST comments", `${coll}/${enc}/comments`, "POST", nb],
-          ["POST on the job with notes list", `${coll}/${enc}`, "POST", { notes: [nb] }],
-          ["PUT on the job with notes list", `${coll}/${enc}`, "PUT", { notes: [nb] }],
-          ["PATCH on the job with notes list", `${coll}/${enc}`, "PATCH", { notes: [nb] }],
-          ["PATCH on the job with note", `${coll}/${enc}`, "PATCH", { note: nb }],
-          ["POST /tasks/notes", `${coll}/notes`, "POST", { ...nb, id }],
-          ["POST /tasknotes", `/tasknotes`, "POST", { ...nb, taskId: id }],
-          ["POST /tasks/{id}/notes with taskId", `${coll}/${enc}/notes`, "POST", { ...nb, taskId: id }]
+          ["PATCH note as text", `${coll}/${enc}`, "PATCH", { note: text }],
+          ["PATCH note as html", `${coll}/${enc}`, "PATCH", { note: html }],
+          ["PATCH note object", `${coll}/${enc}`, "PATCH", { note: nb }],
+          ["PATCH notes as text", `${coll}/${enc}`, "PATCH", { notes: text }],
+          ["PATCH notes as html", `${coll}/${enc}`, "PATCH", { notes: html }],
+          ["PATCH addNote", `${coll}/${enc}`, "PATCH", { addNote: nb }],
+          ["PATCH newNote", `${coll}/${enc}`, "PATCH", { newNote: text }],
+          ["PATCH notes list of text", `${coll}/${enc}`, "PATCH", { notes: [{ note: text }] }],
+          ["PATCH notes list with text", `${coll}/${enc}`, "PATCH", { notes: [{ text, visibility: "INTERNAL_ONLY" }] }],
+          ["PATCH notes list with message", `${coll}/${enc}`, "PATCH", { notes: [{ message: text }] }],
+          ["PATCH notes list with html content and type", `${coll}/${enc}`, "PATCH", { notes: [{ content: html, visibility: "INTERNAL_ONLY", type: "NOTE" }] }],
+          ["PATCH notes list with action add", `${coll}/${enc}`, "PATCH", { notes: [{ action: "add", content: html }] }],
+          ["PATCH noteContent", `${coll}/${enc}`, "PATCH", { noteContent: html, noteVisibility: "INTERNAL_ONLY" }],
+          ["PATCH inside task", `${coll}/${enc}`, "PATCH", { task: { notes: [nb] } }]
         ];
-        for (const [lab, p, m, b] of tries) { if (ok) break; ok = await send2(`note, ${lab}, ${m}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
-        if (!ok) { const fb = new URLSearchParams({ content: html, visibility: "INTERNAL_ONLY" }); ok = await send2("note, form encoded, POST", `${coll}/${enc}/notes`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: fb.toString() }); }
+        for (const [lab, p, m, b] of tries) { if (ok) break; ok = await tryIt(`note, ${lab}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
+        if (!ok) for (const p of ["", "/openapi.json", "/swagger.json", "/docs", "/schema", "/tasks/schema"]) await send2("spec lookup", p, { method: "GET" });
       } else {
         const type = request.headers.get("Content-Type") || "image/jpeg";
         const b64 = (() => { const u = new Uint8Array(bytes); let bin = ""; for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(bin); })();
-        const base = `${coll}/${enc}/documents`;
-        const form = (field, extra) => { const fd = new FormData(); fd.append(field, new Blob([bytes], { type }), name); for (const k of Object.keys(extra || {})) fd.append(k, extra[k]); return fd; };
-        const meta = { fileName: name, name, displayName: name, documentType: "PHOTO" };
-        const tries = [];
-        for (const f of ["file", "document", "upload", "files", "attachment", "image", "data"]) tries.push([`multipart field ${f} with names`, base, "POST", () => form(f, meta)]);
-        tries.push(["multipart file, PUT", base, "PUT", () => form("file", meta)]);
-        tries.push(["multipart file to /documents with parent", `/documents`, "POST", () => form("file", { ...meta, taskId: id, parentId: id })]);
-        tries.push(["multipart file to /documents/upload", `${base}/upload`, "POST", () => form("file", meta)]);
-        tries.push(["multipart file to /upload", `${coll}/${enc}/upload`, "POST", () => form("file", meta)]);
-        tries.push(["multipart file to /photos", `${coll}/${enc}/photos`, "POST", () => form("file", meta)]);
-        tries.push(["multipart file to /images", `${coll}/${enc}/images`, "POST", () => form("file", meta)]);
-        for (const [lab, p, m, mk] of tries) { if (ok) break; ok = await send2(`photo, ${lab}, ${m}`, p, { method: m, body: mk() }); }
-        const jb = [
-          ["json base64 content", { fileName: name, name, contentType: type, content: b64 }],
-          ["json base64 data", { fileName: name, displayName: name, mimeType: type, data: b64 }],
-          ["json base64 file", { fileName: name, file: b64 }],
-          ["json data uri", { fileName: name, file: "data:" + type + ";base64," + b64 }]
+        const up = `${coll}/${enc}/documents/upload`;
+        const q = encodeURIComponent(name);
+        const tries = [
+          ["raw octet-stream with fileName", `${up}?fileName=${q}`, { "Content-Type": "application/octet-stream" }, bytes],
+          ["raw octet-stream with name", `${up}?name=${q}`, { "Content-Type": "application/octet-stream" }, bytes],
+          ["raw octet-stream with disposition", up, { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="${name}"` }, bytes],
+          ["raw octet-stream with name headers", up, { "Content-Type": "application/octet-stream", "X-File-Name": name, "X-Filename": name }, bytes],
+          ["json base64 fileName and content", up, J, JSON.stringify({ fileName: name, content: b64 })],
+          ["json base64 name and data", up, J, JSON.stringify({ name, data: b64 })],
+          ["json base64 name and content", up, J, JSON.stringify({ name, content: b64 })],
+          ["json base64 fileName and data", up, J, JSON.stringify({ fileName: name, data: b64 })],
+          ["json base64 filename and file", up, J, JSON.stringify({ filename: name, file: b64 })],
+          ["json base64 displayName and base64", up, J, JSON.stringify({ displayName: name, fileName: name, base64: b64 })],
+          ["json base64 with content type", up, J, JSON.stringify({ name, fileName: name, contentType: type, mimeType: type, data: b64, content: b64 })]
         ];
-        for (const [lab, b] of jb) { if (ok) break; ok = await send2(`photo, ${lab}, POST`, base, { method: "POST", headers: J, body: JSON.stringify(b) }); }
-        if (!ok) ok = await send2("photo, raw body with disposition, POST", base, { method: "POST", headers: { "Content-Type": type, "Content-Disposition": `attachment; filename="${name}"` }, body: bytes });
-        if (!ok) ok = await send2("photo, raw body, PUT", `${base}?fileName=${encodeURIComponent(name)}`, { method: "PUT", headers: { "Content-Type": type }, body: bytes });
+        for (const [lab, p, h, b] of tries) { if (ok) break; ok = await tryIt(`photo, ${lab}, POST`, p, { method: "POST", headers: h, body: b }); }
       }
       return reply(env, 200, { ok, attempts, worker: WORKER_BUILD });
     }
@@ -6152,5 +6154,5 @@ export default {
   }
 };
 
-globalThis.w172_BOTTOM = "Reservoir-Worker-2026.10.28-w172";
-// Reservoir-Worker-2026.10.28-w172
+globalThis.w173_BOTTOM = "Reservoir-Worker-2026.10.28-w173";
+// Reservoir-Worker-2026.10.28-w173
