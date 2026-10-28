@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w175
-globalThis.w175_TOP = "Reservoir-Worker-2026.10.28-w175";
+// Reservoir-Worker-2026.10.28-w176
+globalThis.w176_TOP = "Reservoir-Worker-2026.10.28-w176";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w175";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w176";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2876,37 +2876,19 @@ async function arofloRoutes(request, env, user, url) {
       if (isNote) {
         const html = "<p>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br />") + "</p>";
         const nb = { content: html, visibility: "INTERNAL_ONLY" };
+        const bulk = `${coll}/${enc}/notes/bulk`;
         const tries = [
-          ["PATCH note as text", `${coll}/${enc}`, "PATCH", { note: text }],
-          ["PATCH note as html", `${coll}/${enc}`, "PATCH", { note: html }],
-          ["PATCH note object", `${coll}/${enc}`, "PATCH", { note: nb }],
-          ["PATCH notes as text", `${coll}/${enc}`, "PATCH", { notes: text }],
-          ["PATCH notes as html", `${coll}/${enc}`, "PATCH", { notes: html }],
-          ["PATCH addNote", `${coll}/${enc}`, "PATCH", { addNote: nb }],
-          ["PATCH newNote", `${coll}/${enc}`, "PATCH", { newNote: text }],
-          ["PATCH notes list of text", `${coll}/${enc}`, "PATCH", { notes: [{ note: text }] }],
-          ["PATCH notes list with text", `${coll}/${enc}`, "PATCH", { notes: [{ text, visibility: "INTERNAL_ONLY" }] }],
-          ["PATCH notes list with message", `${coll}/${enc}`, "PATCH", { notes: [{ message: text }] }],
-          ["PATCH notes list with html content and type", `${coll}/${enc}`, "PATCH", { notes: [{ content: html, visibility: "INTERNAL_ONLY", type: "NOTE" }] }],
-          ["PATCH notes list with action add", `${coll}/${enc}`, "PATCH", { notes: [{ action: "add", content: html }] }],
-          ["PATCH noteContent", `${coll}/${enc}`, "PATCH", { noteContent: html, noteVisibility: "INTERNAL_ONLY" }],
-          ["PATCH inside task", `${coll}/${enc}`, "PATCH", { task: { notes: [nb] } }]
+          ["bulk list of content and visibility", bulk, "POST", { taskNotes: [nb] }],
+          ["bulk list of content", bulk, "POST", { taskNotes: [{ content: html }] }],
+          ["bulk list of plain text content", bulk, "POST", { taskNotes: [{ content: text, visibility: "INTERNAL_ONLY" }] }],
+          ["bulk list of note", bulk, "POST", { taskNotes: [{ note: html, visibility: "INTERNAL_ONLY" }] }],
+          ["bulk list of text", bulk, "POST", { taskNotes: [{ text, visibility: "INTERNAL_ONLY" }] }],
+          ["bulk single object", bulk, "POST", { taskNotes: nb }],
+          ["bulk string", bulk, "POST", { taskNotes: html }],
+          ["bulk list of strings", bulk, "POST", { taskNotes: [html] }],
+          ["bulk list with visibility lower case", bulk, "POST", { taskNotes: [{ content: html, visibility: "internal_only" }] }],
+          ["bulk list with name", bulk, "POST", { taskNotes: [{ name: "Reservoir", content: html, visibility: "INTERNAL_ONLY" }] }]
         ];
-        // Look at what the job record itself calls its note fields, then try writing to exactly those names.
-        const rec = await arofloGet(env, `${coll}/${enc}`);
-        const nkeys = [];
-        const walk = (v, pre, d) => { if (!v || typeof v !== "object" || d > 3) return; for (const k of Object.keys(v)) { const path = pre ? pre + "." + k : k; if (/note|comment|message|log|history|activity/i.test(k)) nkeys.push(path + (Array.isArray(v[k]) ? " (list of " + v[k].length + ")" : typeof v[k] === "object" ? " (object)" : "")); if (!Array.isArray(v[k])) walk(v[k], path, d + 1); } };
-        walk(rec.json, "", 0);
-        attempts.push({ label: "note related fields on the job", path: `${coll}/${enc}`, status: rec.status, body: nkeys.slice(0, 20).join(", ") || "none found; top level keys: " + Object.keys(rec.json || {}).slice(0, 40).join(", ") });
-        const top = nkeys.map((k) => k.split(" ")[0]).filter((k) => !k.includes(".")).slice(0, 6);
-        for (const k of top) {
-          tries.push([`PATCH ${k} as text`, `${coll}/${enc}`, "PATCH", { [k]: text }]);
-          tries.push([`PATCH ${k} as list of content`, `${coll}/${enc}`, "PATCH", { [k]: [nb] }]);
-          tries.push([`PATCH ${k} as content object`, `${coll}/${enc}`, "PATCH", { [k]: nb }]);
-        }
-        for (const sub of ["notes/add", "notes/create", "notes/new", "notes/post", "notes/upload", "notes/save", "notes/send", "note/add", "add-note", "addnote", "notes/text", "notes/bulk", "documents/add", "comments/add"]) tries.unshift([`POST ${sub}`, `${coll}/${enc}/${sub}`, "POST", { ...nb, text, note: html, name: text.slice(0, 40) }]);
-        for (const p of ["tasknotes", "task-notes", "task_notes", "tasks/notes", "notes/tasks"]) tries.push([`POST ${p}`, `/${p}`, "POST", { ...nb, taskId: id, task: id }]);
-        for (const sub of ["activities", "events", "updates", "messages", "history"]) tries.push([`POST ${sub}`, `${coll}/${enc}/${sub}`, "POST", nb]);
         for (const [lab, p, m, b] of tries) { if (ok) break; ok = await tryIt(`note, ${lab}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
       } else {
         const type = request.headers.get("Content-Type") || "image/jpeg";
@@ -6168,5 +6150,5 @@ export default {
   }
 };
 
-globalThis.w175_BOTTOM = "Reservoir-Worker-2026.10.28-w175";
-// Reservoir-Worker-2026.10.28-w175
+globalThis.w176_BOTTOM = "Reservoir-Worker-2026.10.28-w176";
+// Reservoir-Worker-2026.10.28-w176
