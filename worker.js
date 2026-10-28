@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w171
-globalThis.w171_TOP = "Reservoir-Worker-2026.10.28-w171";
+// Reservoir-Worker-2026.10.28-w172
+globalThis.w172_TOP = "Reservoir-Worker-2026.10.28-w172";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w171";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w172";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2854,19 +2854,63 @@ async function arofloRoutes(request, env, user, url) {
         } catch (e) { attempts.push({ label, path, status: 0, body: String(e && e.message || e).slice(0, 160) }); return false; }
       };
       let ok = false;
+      const hdrs = (res) => { const o = []; for (const k of ["allow", "www-authenticate", "content-type", "x-error", "x-message"]) { const v = res.headers.get(k); if (v) o.push(k + ": " + v); } return o.join("; "); };
+      const send2 = async (label, path, init) => {
+        try {
+          const res = await fetch(AROFLO_BASE + path, { ...init, headers: { Authorization: "Bearer " + env.AROFLO_TOKEN, Accept: "application/json", ...(init.headers || {}) } });
+          const t = (await res.text()).replace(/\s+/g, " ").slice(0, 200);
+          const h = hdrs(res);
+          attempts.push({ label, path, status: res.status, body: (h ? "[" + h + "] " : "") + t });
+          return res.ok;
+        } catch (e) { attempts.push({ label, path, status: 0, body: String(e && e.message || e).slice(0, 160) }); return false; }
+      };
+      // First ask AroFlo which methods each route allows.
+      const probe = isNote ? [`${coll}/${enc}/notes`, `/notes`, `${coll}/${enc}`] : [`${coll}/${enc}/documents`, `/documents`, `${coll}/${enc}`];
+      for (const p of probe) await send2("options", p, { method: "OPTIONS" });
+      const J = { "Content-Type": "application/json" };
       if (isNote) {
         const html = "<p>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br />") + "</p>";
-        const shapes = [["content and visibility", { content: html, visibility: "INTERNAL_ONLY" }], ["content only", { content: html }], ["wrapped in note", { note: { content: html, visibility: "INTERNAL_ONLY" } }], ["plain text content", { content: text, visibility: "INTERNAL_ONLY" }]];
-        for (const [lab, b] of shapes) { if (ok) break; ok = await send(`note, ${lab}`, `${coll}/${enc}/notes`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }); }
+        const nb = { content: html, visibility: "INTERNAL_ONLY" };
+        const tries = [
+          ["PUT notes", `${coll}/${enc}/notes`, "PUT", nb],
+          ["PATCH notes", `${coll}/${enc}/notes`, "PATCH", nb],
+          ["POST notes with parent", `/notes`, "POST", { ...nb, taskId: id, parentId: id, parentType: "TASK" }],
+          ["POST note singular", `${coll}/${enc}/note`, "POST", nb],
+          ["POST comments", `${coll}/${enc}/comments`, "POST", nb],
+          ["POST on the job with notes list", `${coll}/${enc}`, "POST", { notes: [nb] }],
+          ["PUT on the job with notes list", `${coll}/${enc}`, "PUT", { notes: [nb] }],
+          ["PATCH on the job with notes list", `${coll}/${enc}`, "PATCH", { notes: [nb] }],
+          ["PATCH on the job with note", `${coll}/${enc}`, "PATCH", { note: nb }],
+          ["POST /tasks/notes", `${coll}/notes`, "POST", { ...nb, id }],
+          ["POST /tasknotes", `/tasknotes`, "POST", { ...nb, taskId: id }],
+          ["POST /tasks/{id}/notes with taskId", `${coll}/${enc}/notes`, "POST", { ...nb, taskId: id }]
+        ];
+        for (const [lab, p, m, b] of tries) { if (ok) break; ok = await send2(`note, ${lab}, ${m}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
+        if (!ok) { const fb = new URLSearchParams({ content: html, visibility: "INTERNAL_ONLY" }); ok = await send2("note, form encoded, POST", `${coll}/${enc}/notes`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: fb.toString() }); }
       } else {
         const type = request.headers.get("Content-Type") || "image/jpeg";
-        for (const seg of ["documents", "attachments", "files"]) {
-          if (ok) break;
-          const fd = new FormData();
-          fd.append("file", new Blob([bytes], { type }), name);
-          ok = await send(`photo as form file to ${seg}`, `${coll}/${enc}/${seg}`, { method: "POST", body: fd });
-          if (!ok) ok = await send(`photo as raw body to ${seg}`, `${coll}/${enc}/${seg}?fileName=${encodeURIComponent(name)}`, { method: "POST", headers: { "Content-Type": type }, body: bytes });
-        }
+        const b64 = (() => { const u = new Uint8Array(bytes); let bin = ""; for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(bin); })();
+        const base = `${coll}/${enc}/documents`;
+        const form = (field, extra) => { const fd = new FormData(); fd.append(field, new Blob([bytes], { type }), name); for (const k of Object.keys(extra || {})) fd.append(k, extra[k]); return fd; };
+        const meta = { fileName: name, name, displayName: name, documentType: "PHOTO" };
+        const tries = [];
+        for (const f of ["file", "document", "upload", "files", "attachment", "image", "data"]) tries.push([`multipart field ${f} with names`, base, "POST", () => form(f, meta)]);
+        tries.push(["multipart file, PUT", base, "PUT", () => form("file", meta)]);
+        tries.push(["multipart file to /documents with parent", `/documents`, "POST", () => form("file", { ...meta, taskId: id, parentId: id })]);
+        tries.push(["multipart file to /documents/upload", `${base}/upload`, "POST", () => form("file", meta)]);
+        tries.push(["multipart file to /upload", `${coll}/${enc}/upload`, "POST", () => form("file", meta)]);
+        tries.push(["multipart file to /photos", `${coll}/${enc}/photos`, "POST", () => form("file", meta)]);
+        tries.push(["multipart file to /images", `${coll}/${enc}/images`, "POST", () => form("file", meta)]);
+        for (const [lab, p, m, mk] of tries) { if (ok) break; ok = await send2(`photo, ${lab}, ${m}`, p, { method: m, body: mk() }); }
+        const jb = [
+          ["json base64 content", { fileName: name, name, contentType: type, content: b64 }],
+          ["json base64 data", { fileName: name, displayName: name, mimeType: type, data: b64 }],
+          ["json base64 file", { fileName: name, file: b64 }],
+          ["json data uri", { fileName: name, file: "data:" + type + ";base64," + b64 }]
+        ];
+        for (const [lab, b] of jb) { if (ok) break; ok = await send2(`photo, ${lab}, POST`, base, { method: "POST", headers: J, body: JSON.stringify(b) }); }
+        if (!ok) ok = await send2("photo, raw body with disposition, POST", base, { method: "POST", headers: { "Content-Type": type, "Content-Disposition": `attachment; filename="${name}"` }, body: bytes });
+        if (!ok) ok = await send2("photo, raw body, PUT", `${base}?fileName=${encodeURIComponent(name)}`, { method: "PUT", headers: { "Content-Type": type }, body: bytes });
       }
       return reply(env, 200, { ok, attempts, worker: WORKER_BUILD });
     }
@@ -6108,5 +6152,5 @@ export default {
   }
 };
 
-globalThis.w171_BOTTOM = "Reservoir-Worker-2026.10.28-w171";
-// Reservoir-Worker-2026.10.28-w171
+globalThis.w172_BOTTOM = "Reservoir-Worker-2026.10.28-w172";
+// Reservoir-Worker-2026.10.28-w172
