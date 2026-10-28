@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w169
-globalThis.w169_TOP = "Reservoir-Worker-2026.10.28-w169";
+// Reservoir-Worker-2026.10.28-w170
+globalThis.w170_TOP = "Reservoir-Worker-2026.10.28-w170";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w169";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w170";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2939,19 +2939,49 @@ async function arofloRoutes(request, env, user, url) {
       const top = rows.slice(0, 10).map((x) => ({ id: String((x.rec && (x.rec.id ?? x.rec.projectId ?? x.rec.ID)) ?? x.shape.number ?? x.i), number: x.shape.number, client: x.shape.client, address: x.shape.address, when: x.shape.when, fields: arofloFlat(x.rec, "", [], 0) }));
       return reply(env, 200, { ok: true, status: r.status, total: list.length, orderedBy, steps, meta, lastPage, items: top, worker: WORKER_BUILD });
     }
-    // A file from AroFlo's document store (a photo or a document), passed through so the app can show it. Directors only, read only.
+    // A file from AroFlo's document store (a photo or a document), passed through so the app can show it. Directors only, read only. AroFlo's download route is not published, so the document's own record is read for links and the likely routes are tried, and every answer is reported.
     if (url.pathname === "/api/aroflo/file") {
       const p = String(url.searchParams.get("path") || "");
-      if (!/^\/DocStorage\/[A-Za-z0-9_-]{4,80}$/.test(p)) return reply(env, 400, { error: "bad path" });
+      const doc = String(url.searchParams.get("doc") || "");
+      const coll = String(url.searchParams.get("coll") || "");
+      const job = String(url.searchParams.get("job") || "");
+      if (!/^\/DocStorage\/[A-Za-z0-9_-]{4,80}$/.test(p) || (doc && !/^[A-Za-z0-9_-]{3,60}$/.test(doc)) || (job && !/^[A-Za-z0-9_.-]{1,60}$/.test(job)) || (coll && !/^\/(tasks|projects|jobs)$/.test(coll))) return reply(env, 400, { error: "bad request" });
       const tried = [];
-      for (const base of [AROFLO_BASE, "https://api.aroflo.com", "https://app.aroflo.com"]) {
+      const cands = [];
+      const known = new Set();
+      const add = (u) => { if (u && !known.has(u)) { known.add(u); cands.push(u); } };
+      // Links named in the document's own record.
+      const recs = [];
+      if (doc) { if (coll && job) recs.push(`${AROFLO_BASE}${coll}/${encodeURIComponent(job)}/documents/${encodeURIComponent(doc)}`); recs.push(`${AROFLO_BASE}/documents/${encodeURIComponent(doc)}`); }
+      for (const u of recs) {
         try {
-          const res = await fetch(base + p, { headers: { Authorization: "Bearer " + env.AROFLO_TOKEN }, redirect: "follow" });
-          tried.push(`${base}${p} answered ${res.status}`);
-          const ct = res.headers.get("content-type") || "";
-          if (res.ok && !/text\/html|application\/json/i.test(ct)) return new Response(res.body, { status: 200, headers: { "Content-Type": ct || "application/octet-stream", "Cache-Control": "private, max-age=300", ...cors(env) } });
-          if (res.ok) tried.push(`it was ${ct}, not a file`);
-        } catch (e) { tried.push(`${base} failed`); }
+          const r = await fetch(u, { headers: { Authorization: "Bearer " + env.AROFLO_TOKEN, Accept: "application/json" } });
+          const t = await r.text();
+          tried.push(`${u.replace(AROFLO_BASE, "")} record ${r.status}`);
+          let j = null; try { j = JSON.parse(t); } catch (e) { j = null; }
+          if (r.ok && j) arofloFlat(j, "", [], 0).forEach(([k, v]) => { if (/(url|link|href|download|signed|location)/i.test(k) && /^(https?:\/\/|\/)/.test(String(v)) && !/insertedByUser|avatar/i.test(k)) add(String(v).startsWith("/") ? (String(v).startsWith("/v2") ? "https://api.aroflo.com" + v : AROFLO_BASE + v) : String(v)); });
+        } catch (e) { tried.push("record failed"); }
+      }
+      if (doc) for (const seg of ["download", "content", "file", "original", "data", ""]) {
+        add(`${AROFLO_BASE}/documents/${encodeURIComponent(doc)}${seg ? "/" + seg : ""}`);
+        if (coll && job) add(`${AROFLO_BASE}${coll}/${encodeURIComponent(job)}/documents/${encodeURIComponent(doc)}${seg ? "/" + seg : ""}`);
+      }
+      add(AROFLO_BASE + p);
+      add("https://api.aroflo.com" + p);
+      const isFile = (res) => { const ct = res.headers.get("content-type") || ""; return res.ok && !/text\/html|application\/json|text\/plain/i.test(ct); };
+      for (const u of cands.slice(0, 20)) {
+        try {
+          let res = await fetch(u, { headers: { Authorization: "Bearer " + env.AROFLO_TOKEN }, redirect: "manual" });
+          const short = u.replace("https://api.aroflo.com", "").replace(/^\/v2/, "").slice(0, 90);
+          if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+            const loc = new URL(res.headers.get("location"), u).toString();
+            tried.push(`${short} redirected`);
+            res = await fetch(loc, { redirect: "follow" });
+            tried.push(`${short} then ${res.status}`);
+          } else tried.push(`${short} ${res.status}`);
+          if (isFile(res)) return new Response(res.body, { status: 200, headers: { "Content-Type": res.headers.get("content-type") || "application/octet-stream", "Cache-Control": "private, max-age=300", ...cors(env) } });
+          if (res.ok && /json/i.test(res.headers.get("content-type") || "")) { try { const j = await res.json(); const link = arofloFlat(j, "", [], 0).find(([k, v]) => /(url|link|href|download|signed)/i.test(k) && /^https?:\/\//.test(String(v))); if (link) { const r2 = await fetch(String(link[1]), { redirect: "follow" }); tried.push(`its link ${r2.status}`); if (isFile(r2)) return new Response(r2.body, { status: 200, headers: { "Content-Type": r2.headers.get("content-type") || "application/octet-stream", "Cache-Control": "private, max-age=300", ...cors(env) } }); } } catch (e) { /* not a link */ } }
+        } catch (e) { tried.push(`${u.slice(-40)} failed`); }
       }
       return reply(env, 502, { error: "AroFlo would not give that file", tried });
     }
@@ -3013,7 +3043,7 @@ async function arofloRoutes(request, env, user, url) {
           const person = (pre) => [get(new RegExp(`${pre}.*givenName$`, "i")), get(new RegExp(`${pre}.*familyName$`, "i"))].filter(Boolean).join(" ");
           const plain = (h) => String(h || "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>\s*<p[^>]*>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\n{3,}/g, "\n\n").trim();
           if (seg === "notes") return { text: plain(get(/(^|\.)content$/i)), by: person("postedBy"), when: get(/(timestampCreated|created)/i), fields: [] };
-          return { name: get(/(^|\.)displayName$/i) || get(/(^|\.)name$/i), fileName: get(/(^|\.)fileName$/i), by: person("insertedByUser"), when: get(/datetimeInserted/i), original: get(/(^|\.)original$/i), thumbnail: get(/(^|\.)thumbnail$/i), type: get(/documentType/i), size: Number(get(/fileSizeBytes/i)) || 0, fields: [] };
+          return { id: (flat.find(([k]) => k === "id") || [])[1] || "", name: get(/(^|\.)displayName$/i) || get(/(^|\.)name$/i), fileName: get(/(^|\.)fileName$/i), by: person("insertedByUser"), when: get(/datetimeInserted/i), original: get(/(^|\.)original$/i), thumbnail: get(/(^|\.)thumbnail$/i), type: get(/documentType/i), size: Number(get(/fileSizeBytes/i)) || 0, fields: [] };
         });
       }
       return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: bestName ? String(bestName[1]) : shape.client, address: siteAddress || shape.address, fields: jobFlat.slice(0, 120), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
@@ -6038,5 +6068,5 @@ export default {
   }
 };
 
-globalThis.w169_BOTTOM = "Reservoir-Worker-2026.10.28-w169";
-// Reservoir-Worker-2026.10.28-w169
+globalThis.w170_BOTTOM = "Reservoir-Worker-2026.10.28-w170";
+// Reservoir-Worker-2026.10.28-w170
