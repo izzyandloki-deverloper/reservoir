@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w165
-globalThis.w165_TOP = "Reservoir-Worker-2026.10.28-w165";
+// Reservoir-Worker-2026.10.28-w166
+globalThis.w166_TOP = "Reservoir-Worker-2026.10.28-w166";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w165";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w166";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2827,9 +2827,74 @@ async function arofloDiscover(env) {
 async function arofloRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/aroflo")) return null;
   if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
-  if (request.method !== "GET") return reply(env, 404, { error: "not found" });
+  const isPush = url.pathname === "/api/aroflo/push-test" && request.method === "POST";
+  if (request.method !== "GET" && !isPush) return reply(env, 404, { error: "not found" });
   if (!env.AROFLO_TOKEN) return reply(env, 200, { ok: false, error: "The AROFLO_TOKEN secret is not set on the Worker.", worker: WORKER_BUILD });
   try {
+    // A test only. Finds one project by its number, then tries to add a note and a small test PDF to it, and reports exactly what AroFlo answered for every attempt. Directors only, and only when the button is pressed.
+    if (isPush) {
+      let body = {};
+      try { body = await request.json(); } catch (e) { body = {}; }
+      const want = String(body.jobNumber || "").trim();
+      if (!want || !/^[A-Za-z0-9_.-]{1,40}$/.test(want)) return reply(env, 400, { error: "Enter a job number" });
+      const log = [];
+      const note = (m) => log.push(m);
+      let pid = "";
+      const direct = await arofloGet(env, "/projects/" + encodeURIComponent(want));
+      if (direct.ok && direct.json) { pid = want; note(`Found project ${want} directly.`); }
+      else {
+        note(`Direct lookup of ${want} answered ${direct.status}. Searching the list.`);
+        const first = await arofloGet(env, "/projects");
+        let lastPage = 1;
+        if (first.ok) {
+          const l0 = arofloList(first.json) || [];
+          lastPage = arofloLastPage(arofloMeta(first.json), l0.length) || 1;
+          const hit0 = l0.find((rec) => { const sh = arofloShape(rec); return sh.number === want || String(rec && (rec.id ?? rec.projectId ?? rec.ID)) === want; });
+          if (hit0) pid = String(hit0.id ?? hit0.projectId ?? hit0.ID);
+        }
+        for (let pg = lastPage; !pid && pg >= 1 && pg > lastPage - 8; pg--) {
+          const rp = await arofloGet(env, "/projects?page=" + pg);
+          const lp = rp.ok ? arofloList(rp.json) : null;
+          if (!lp) { note(`Page ${pg} answered ${rp.status}.`); continue; }
+          const hit = lp.find((rec) => { const sh = arofloShape(rec); return sh.number === want || String(rec && (rec.id ?? rec.projectId ?? rec.ID)) === want; });
+          if (hit) pid = String(hit.id ?? hit.projectId ?? hit.ID);
+        }
+        note(pid ? `Found project id ${pid} for ${want}.` : `No project matched ${want} in the newest ${Math.min(8, lastPage)} pages.`);
+      }
+      if (!pid) return reply(env, 200, { ok: false, log, attempts: [], worker: WORKER_BUILD });
+      const disc = await arofloDiscover(env);
+      const interesting = [];
+      disc.forEach((d) => (d.paths || []).forEach((p) => { if (/note|document|attach|file|photo|comment|upload|image/i.test(p)) interesting.push(p); }));
+      note(interesting.length ? `AroFlo lists these related paths: ${Array.from(new Set(interesting)).slice(0, 25).join(", ")}` : "AroFlo published no list of paths to read.");
+      const attempts = [];
+      const send = async (label, path, init) => {
+        try {
+          const res = await fetch(AROFLO_BASE + path, { ...init, headers: { Authorization: "Bearer " + env.AROFLO_TOKEN, Accept: "application/json", ...(init.headers || {}) } });
+          const text = (await res.text()).slice(0, 300);
+          attempts.push({ label, path, method: init.method, status: res.status, allow: res.headers.get("allow") || "", body: text });
+          return res.ok;
+        } catch (e) { attempts.push({ label, path, method: init.method, status: 0, allow: "", body: String(e && e.message || e).slice(0, 200) }); return false; }
+      };
+      const stamp = new Date().toISOString();
+      const msg = `Reservoir test, please ignore. ${stamp}`;
+      const enc = encodeURIComponent(pid);
+      let noteOk = false;
+      for (const key of ["note", "text", "content"]) {
+        for (const seg of ["notes", "comments"]) {
+          if (noteOk) break;
+          noteOk = await send(`note as ${key}`, `/projects/${enc}/${seg}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ [key]: msg }) });
+        }
+      }
+      const pdf = "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 60>>stream\nBT /F1 12 Tf 10 50 Td (Reservoir test) Tj ET\nendstream endobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF";
+      let docOk = false;
+      for (const seg of ["documents", "attachments", "files", "photos"]) {
+        if (docOk) break;
+        const fd = new FormData();
+        fd.append("file", new Blob([pdf], { type: "application/pdf" }), "Reservoir test.pdf");
+        docOk = await send(`file upload to ${seg}`, `/projects/${enc}/${seg}`, { method: "POST", body: fd });
+      }
+      return reply(env, 200, { ok: noteOk || docOk, noteOk, docOk, projectId: pid, log, attempts, worker: WORKER_BUILD });
+    }
     if (url.pathname === "/api/aroflo/test") {
       // Defaults to the healthcheck. A different GET path can be tried with ?path=/something, GET only.
       let path = String(url.searchParams.get("path") || "/healthcheck");
@@ -5894,5 +5959,5 @@ export default {
   }
 };
 
-globalThis.w165_BOTTOM = "Reservoir-Worker-2026.10.28-w165";
-// Reservoir-Worker-2026.10.28-w165
+globalThis.w166_BOTTOM = "Reservoir-Worker-2026.10.28-w166";
+// Reservoir-Worker-2026.10.28-w166
