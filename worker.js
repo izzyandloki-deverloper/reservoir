@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w164
-globalThis.w164_TOP = "Reservoir-Worker-2026.10.28-w164";
+// Reservoir-Worker-2026.10.28-w165
+globalThis.w165_TOP = "Reservoir-Worker-2026.10.28-w165";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w164";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w165";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -5709,6 +5709,7 @@ export default {
         if (type === "reimbursement" && body.status === "paid" && user.tier === "T1") { rowStatus = "paid"; doneOn = date; }
         await env.DB.prepare("INSERT OR IGNORE INTO receipt_records (id, by_name, by_email, type, amount, note, item_id, file_name, status, view, sent_date, done_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
           .bind(id, byName, byMail, type, type === "reimbursement" ? txt(body.amount, 12) : "", txt(body.text, 500), txt(body.itemId, 200), txt(body.fileName, 200), rowStatus, view, date, doneOn).run();
+        if (type === "reimbursement" && rowStatus === "paid") await notify(env, { to: byMail, kind: "receipt", title: "Reimbursement request processed", body: "Your reimbursement has been paid. Open Receipts to see it.", link: "receipts", by: user.name || mail });
         return reply(env, 200, { ok: true });
       }
       if (request.method === "POST" && rrm[1]) {
@@ -5716,6 +5717,11 @@ export default {
         if (!["paid", "declined"].includes(body.status)) return reply(env, 400, { error: "bad status" });
         const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? body.date : today;
         await env.DB.prepare("UPDATE receipt_records SET status = ?, done_date = ? WHERE id = ?").bind(body.status, date, rrm[1]).run();
+        // The person being reimbursed is told it is processed, even when the director who processed it is the one who logged it.
+        if (body.status === "paid") {
+          const rr = await env.DB.prepare("SELECT by_email, type FROM receipt_records WHERE id = ?").bind(rrm[1]).first();
+          if (rr && rr.by_email && rr.type === "reimbursement") await notify(env, { to: rr.by_email, kind: "receipt", title: "Reimbursement request processed", body: "Your reimbursement has been paid. Open Receipts to see it.", link: "receipts", by: user.name || mail });
+        }
         return reply(env, 200, { ok: true });
       }
       return reply(env, 405, { error: "method not allowed" });
@@ -5888,5 +5894,5 @@ export default {
   }
 };
 
-globalThis.w164_BOTTOM = "Reservoir-Worker-2026.10.28-w164";
-// Reservoir-Worker-2026.10.28-w164
+globalThis.w165_BOTTOM = "Reservoir-Worker-2026.10.28-w165";
+// Reservoir-Worker-2026.10.28-w165
