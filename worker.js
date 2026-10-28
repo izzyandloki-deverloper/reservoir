@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w170
-globalThis.w170_TOP = "Reservoir-Worker-2026.10.28-w170";
+// Reservoir-Worker-2026.10.28-w171
+globalThis.w171_TOP = "Reservoir-Worker-2026.10.28-w171";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w170";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w171";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2827,11 +2827,49 @@ async function arofloDiscover(env) {
 async function arofloRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/aroflo")) return null;
   if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
-  const isPush = url.pathname === "/api/aroflo/push-test" && request.method === "POST";
+  const isPush = (url.pathname === "/api/aroflo/push-test" || url.pathname === "/api/aroflo/push-note" || url.pathname === "/api/aroflo/push-file") && request.method === "POST";
   if (request.method !== "GET" && !isPush) return reply(env, 404, { error: "not found" });
   if (!env.AROFLO_TOKEN) return reply(env, 200, { ok: false, error: "The AROFLO_TOKEN secret is not set on the Worker.", worker: WORKER_BUILD });
   try {
     // A test only. Finds one project by its number, then tries to add a note and a small test PDF to it, and reports exactly what AroFlo answered for every attempt. Directors only, and only when the button is pressed.
+    // Add a note, or a photo, to a job. A director presses the button on the AroFlo Push screen. AroFlo's write routes are not published, so the likely ones are tried in turn and every answer is reported.
+    if (isPush && (url.pathname === "/api/aroflo/push-note" || url.pathname === "/api/aroflo/push-file")) {
+      const isNote = url.pathname === "/api/aroflo/push-note";
+      let body = {};
+      let bytes = null;
+      let coll = "", id = "", name = "";
+      if (isNote) { try { body = await request.json(); } catch (e) { body = {}; } coll = String(body.coll || ""); id = String(body.id || ""); }
+      else { coll = String(url.searchParams.get("coll") || ""); id = String(url.searchParams.get("id") || ""); name = String(url.searchParams.get("name") || "photo.jpg").replace(/[^A-Za-z0-9._ -]/g, "").slice(0, 80) || "photo.jpg"; bytes = await request.arrayBuffer(); if (!bytes.byteLength) return reply(env, 400, { error: "empty file" }); if (bytes.byteLength > 12 * 1024 * 1024) return reply(env, 413, { error: "file too large" }); }
+      if (!/^\/(tasks|projects|jobs)$/.test(coll) || !/^[A-Za-z0-9_.-]{1,60}$/.test(id)) return reply(env, 400, { error: "bad job" });
+      const text = isNote ? String(body.text || "").trim().slice(0, 4000) : "";
+      if (isNote && !text) return reply(env, 400, { error: "Write a note first" });
+      const enc = encodeURIComponent(id);
+      const attempts = [];
+      const send = async (label, path, init) => {
+        try {
+          const res = await fetch(AROFLO_BASE + path, { ...init, headers: { Authorization: "Bearer " + env.AROFLO_TOKEN, Accept: "application/json", ...(init.headers || {}) } });
+          const t = (await res.text()).slice(0, 240);
+          attempts.push({ label, path, status: res.status, body: t });
+          return res.ok;
+        } catch (e) { attempts.push({ label, path, status: 0, body: String(e && e.message || e).slice(0, 160) }); return false; }
+      };
+      let ok = false;
+      if (isNote) {
+        const html = "<p>" + text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br />") + "</p>";
+        const shapes = [["content and visibility", { content: html, visibility: "INTERNAL_ONLY" }], ["content only", { content: html }], ["wrapped in note", { note: { content: html, visibility: "INTERNAL_ONLY" } }], ["plain text content", { content: text, visibility: "INTERNAL_ONLY" }]];
+        for (const [lab, b] of shapes) { if (ok) break; ok = await send(`note, ${lab}`, `${coll}/${enc}/notes`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }); }
+      } else {
+        const type = request.headers.get("Content-Type") || "image/jpeg";
+        for (const seg of ["documents", "attachments", "files"]) {
+          if (ok) break;
+          const fd = new FormData();
+          fd.append("file", new Blob([bytes], { type }), name);
+          ok = await send(`photo as form file to ${seg}`, `${coll}/${enc}/${seg}`, { method: "POST", body: fd });
+          if (!ok) ok = await send(`photo as raw body to ${seg}`, `${coll}/${enc}/${seg}?fileName=${encodeURIComponent(name)}`, { method: "POST", headers: { "Content-Type": type }, body: bytes });
+        }
+      }
+      return reply(env, 200, { ok, attempts, worker: WORKER_BUILD });
+    }
     if (isPush) {
       let body = {};
       try { body = await request.json(); } catch (e) { body = {}; }
@@ -3046,7 +3084,9 @@ async function arofloRoutes(request, env, user, url) {
           return { id: (flat.find(([k]) => k === "id") || [])[1] || "", name: get(/(^|\.)displayName$/i) || get(/(^|\.)name$/i), fileName: get(/(^|\.)fileName$/i), by: person("insertedByUser"), when: get(/datetimeInserted/i), original: get(/(^|\.)original$/i), thumbnail: get(/(^|\.)thumbnail$/i), type: get(/documentType/i), size: Number(get(/fileSizeBytes/i)) || 0, fields: [] };
         });
       }
-      return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: bestName ? String(bestName[1]) : shape.client, address: siteAddress || shape.address, fields: jobFlat.slice(0, 120), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
+      const nameFlat = jobFlat.filter(([k, v]) => v !== "" && v !== "(empty list)");
+      const taskNameF = nameFlat.find(([k]) => /^(taskName|name|title|summary|description)$/i.test(k)) || nameFlat.find(([k]) => /(^|\.)(taskName|title|summary)$/i.test(k));
+      return reply(env, 200, { ok: true, collection: coll, id, taskName: taskNameF ? String(taskNameF[1]).slice(0, 200) : "", number: shape.number || want, client: bestName ? String(bestName[1]) : shape.client, address: siteAddress || shape.address, fields: jobFlat.slice(0, 120), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
     }
     // One project pulled raw. Lists every field AroFlo sends for it.
     if (url.pathname === "/api/aroflo/project") {
@@ -6068,5 +6108,5 @@ export default {
   }
 };
 
-globalThis.w170_BOTTOM = "Reservoir-Worker-2026.10.28-w170";
-// Reservoir-Worker-2026.10.28-w170
+globalThis.w171_BOTTOM = "Reservoir-Worker-2026.10.28-w171";
+// Reservoir-Worker-2026.10.28-w171
