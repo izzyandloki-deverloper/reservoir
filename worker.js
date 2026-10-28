@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w179
-globalThis.w179_TOP = "Reservoir-Worker-2026.10.28-w179";
+// Reservoir-Worker-2026.10.28-w180
+globalThis.w180_TOP = "Reservoir-Worker-2026.10.28-w180";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w179";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w180";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2824,6 +2824,70 @@ async function arofloDiscover(env) {
   }
   return found;
 }
+// ---- Email Accounts. Read only view and new mail pings for four DFP mailboxes, through the same Microsoft Graph app as SharePoint. The app registration needs the Mail.Read application permission (admin consent), ideally limited to these mailboxes. ----
+const MAILBOXES = [
+  { id: "tayler", label: "Tayler", address: "tayler@directflow.com.au", only: ["tayler@directflow.com.au"] },
+  { id: "jobs", label: "DFP Jobs", address: "dfpjobs@directflow.com.au", tiers: ["T1", "T2"] },
+  { id: "maintenance", label: "Maintenance", address: "maintenance@directflow.com.au", tiers: ["T1", "T2"] },
+  { id: "accounts", label: "Accounts", address: "accounts@directflow.com.au", tiers: ["T1"] }
+];
+const mailAddress = (env, b) => String((env && env["MAILBOX_" + b.id.toUpperCase()]) || b.address).toLowerCase();
+const mailAllowed = (b, user) => b.only ? b.only.includes(String(user.email || "").toLowerCase()) : b.tiers.includes(user.tier);
+async function mailGraph(env, address, qs) {
+  let res = await graphFetch(env, `/users/${encodeURIComponent(address)}${qs}`);
+  if (res.status === 401 || res.status === 403) { graphToken = { value: null, at: 0 }; res = await graphFetch(env, `/users/${encodeURIComponent(address)}${qs}`); }
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { json = null; }
+  return { ok: res.ok, status: res.status, json, text };
+}
+const mailWhy = (r) => r.status === 403 || r.status === 401 ? "Reservoir's Microsoft app does not have permission to read this mailbox yet. The Mail.Read application permission needs adding and approving in Entra." : r.status === 404 ? "Microsoft could not find this mailbox." : `Microsoft answered ${r.status}.`;
+async function mailRoutes(request, env, user, url) {
+  if (!url.pathname.startsWith("/api/mail")) return null;
+  if (request.method !== "GET") return reply(env, 404, { error: "not found" });
+  const mine = MAILBOXES.filter((b) => mailAllowed(b, user));
+  try {
+    if (url.pathname === "/api/mail/boxes") {
+      const out = await Promise.all(mine.map(async (b) => {
+        const r = await mailGraph(env, mailAddress(env, b), "/mailFolders/inbox?$select=unreadItemCount");
+        return { id: b.id, label: b.label, unread: r.ok && r.json ? Number(r.json.unreadItemCount || 0) : 0, error: r.ok ? "" : mailWhy(r) };
+      }));
+      return reply(env, 200, { boxes: out, worker: WORKER_BUILD });
+    }
+    if (url.pathname === "/api/mail/box") {
+      const b = mine.find((x) => x.id === url.searchParams.get("id"));
+      if (!b) return reply(env, 403, { error: "forbidden" });
+      const r = await mailGraph(env, mailAddress(env, b), "/mailFolders/inbox/messages?$top=25&$select=subject,from,receivedDateTime,isRead,bodyPreview&$orderby=receivedDateTime desc");
+      if (!r.ok) return reply(env, 200, { ok: false, error: mailWhy(r), worker: WORKER_BUILD });
+      const list = ((r.json && r.json.value) || []).map((m) => ({ from: String((m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || "").slice(0, 80), subject: String(m.subject || "(no subject)").slice(0, 160), at: m.receivedDateTime || "", read: !!m.isRead, preview: String(m.bodyPreview || "").replace(/\s+/g, " ").slice(0, 140) }));
+      return reply(env, 200, { ok: true, label: b.label, messages: list, worker: WORKER_BUILD });
+    }
+  } catch (e) { return reply(env, 200, { ok: false, error: String(e && e.message || e).slice(0, 160), worker: WORKER_BUILD }); }
+  return reply(env, 404, { error: "not found" });
+}
+// Looks for mail that arrived since the last look and tells everyone who has access. The first look only marks the time, so nothing floods in.
+async function mailWatch(env) {
+  if (!env.GRAPH_CLIENT_SECRET) return;
+  await settingsTable(env);
+  const tiers = await accessTiers(env);
+  for (const b of MAILBOXES) {
+    const key = "mail.seen." + b.id;
+    const row = await env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first();
+    const now = new Date().toISOString();
+    const save = (v) => env.DB.prepare("INSERT INTO app_settings (key, value, detail, by_name, at) VALUES (?, ?, 'mail watch', 'Reservoir', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = datetime('now')").bind(key, v).run();
+    if (!row) { await save(now); continue; }
+    const r = await mailGraph(env, mailAddress(env, b), `/mailFolders/inbox/messages?$top=20&$select=subject,from,receivedDateTime&$orderby=receivedDateTime desc&$filter=${encodeURIComponent("receivedDateTime gt " + row.value)}`);
+    if (!r.ok) { console.log("mail watch", b.id, r.status); continue; }
+    const fresh = ((r.json && r.json.value) || []);
+    if (!fresh.length) continue;
+    const newest = fresh.map((m) => m.receivedDateTime).sort().pop();
+    const who = (m) => String((m.from && m.from.emailAddress && (m.from.emailAddress.name || m.from.emailAddress.address)) || "Someone").slice(0, 60);
+    const body = fresh.length === 1 ? `${who(fresh[0])}: ${String(fresh[0].subject || "(no subject)").slice(0, 100)}` : `${fresh.length} new emails, latest from ${who(fresh[0])}`;
+    const to = Object.keys(tiers).filter((e) => mailAllowed(b, { email: e, tier: tiers[e] }));
+    for (const e of to) await notify(env, { to: e, kind: "mail", title: `New email, ${b.label}`, body, link: "emailbox", by: "Reservoir" });
+    await save(newest);
+  }
+}
 async function arofloRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/aroflo")) return null;
   if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
@@ -3512,7 +3576,7 @@ async function noticesTable(env) {
   }
 }
 // Push notifications. Which kinds of notice also go to people's phones is decided here, once. Anything marked todo (someone has to act) also pushes. To change what pushes, change this list.
-const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request", "policy", "dailyops"];
+const PUSH_KINDS = ["timesheet", "payroll", "cardreset", "card", "request", "policy", "dailyops", "mail"];
 const b64uEnc = (buf) => { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
 const b64uDec = (str) => { const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/"); const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4)); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
@@ -4373,6 +4437,8 @@ async function tsXeroPullSchedule(env) {
 export default {
   // Runs on a Cloudflare cron trigger if one is added (for example Thursday early morning). It only refreshes leave balances and leave history from Xero into D1.
   async scheduled(event, env, ctx) {
+    // A five minute trigger, if one is added, only looks for new mail so pings arrive quickly.
+    if (event && event.cron === "*/5 * * * *") { ctx.waitUntil(mailWatch(env).catch((e) => console.log("mail watch failed", String(e && e.message || e)))); return; }
     // Every run checks the automatic timesheets and the payroll sweeps. The leave sync keeps its own schedule and is skipped on the half hourly one.
     ctx.waitUntil(tsAutoRun(env).catch((e) => console.log("auto timesheets failed", String(e && e.message || e))));
     ctx.waitUntil(pushFlushHeld(env));
@@ -4380,6 +4446,7 @@ export default {
     ctx.waitUntil(tsResendSalaried(env).catch((e) => console.log("resend salaried failed", String(e && e.message || e))));
     ctx.waitUntil(tsXeroPullSchedule(env).catch((e) => console.log("timesheet pull failed", String(e && e.message || e))));
     ctx.waitUntil(pushOneOffAndrey(env).catch((e) => console.log("one off failed", String(e && e.message || e))));
+    ctx.waitUntil(mailWatch(env).catch((e) => console.log("mail watch failed", String(e && e.message || e))));
     ctx.waitUntil(payrollSweep(env).catch((e) => console.log("payroll sweep failed", String(e && e.message || e))));
     if (event && event.cron === "*/30 * * * *") return;
     ctx.waitUntil(leaveSync(env).catch((e) => console.log("leave sync failed", String(e && e.message || e))));
@@ -4462,6 +4529,8 @@ export default {
         return reply(env, 200, { key: b.key, worker: WORKER_BUILD });
       }
     }
+    const mailReply = await mailRoutes(request, env, user, url);
+    if (mailReply) return mailReply;
     const arofloReply = await arofloRoutes(request, env, user, url);
     if (arofloReply) return arofloReply;
 
@@ -6147,5 +6216,5 @@ export default {
   }
 };
 
-globalThis.w179_BOTTOM = "Reservoir-Worker-2026.10.28-w179";
-// Reservoir-Worker-2026.10.28-w179
+globalThis.w180_BOTTOM = "Reservoir-Worker-2026.10.28-w180";
+// Reservoir-Worker-2026.10.28-w180
