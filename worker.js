@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w178
-globalThis.w178_TOP = "Reservoir-Worker-2026.10.28-w178";
+// Reservoir-Worker-2026.10.28-w179
+globalThis.w179_TOP = "Reservoir-Worker-2026.10.28-w179";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w178";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w179";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2971,38 +2971,6 @@ async function arofloRoutes(request, env, user, url) {
         docOk = await send(`file upload to ${seg}`, `/projects/${enc}/${seg}`, { method: "POST", body: fd });
       }
       return reply(env, 200, { ok: noteOk || docOk, noteOk, docOk, projectId: pid, log, attempts, worker: WORKER_BUILD });
-    }
-    // The team calendar for one day. AroFlo's schedule routes are not published, so the likely ones are asked in turn, every answer is reported, and anything that looks like a booking (a start time and a person) is grouped by person.
-    if (url.pathname === "/api/aroflo/schedule") {
-      const date = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date") || "") ? url.searchParams.get("date") : new Date(Date.now() + 11 * 3600 * 1000).toISOString().slice(0, 10);
-      const next = new Date(Date.parse(date + "T00:00:00Z") + 86400000).toISOString().slice(0, 10);
-      const cands = [`/schedules?date=${date}`, `/schedules?startDate=${date}&endDate=${date}`, `/schedule?date=${date}`, `/calendar?date=${date}`, `/appointments?date=${date}`, `/tasks/schedules?date=${date}`, `/scheduling?date=${date}`, `/tasks?scheduledDate=${date}`, `/tasks?startDate=${date}&endDate=${next}`, `/tasks?scheduledStart=${date}`, `/users`, `/staff`, `/resources`, `/timesheets?date=${date}`];
-      const diag = [];
-      let best = null;
-      const lookKey = (flat, res) => { for (const re of res) { const h = flat.find(([k, v]) => re.test(k) && v !== "" && v !== "(empty list)"); if (h) return h[1]; } return ""; };
-      for (const p of cands) {
-        try {
-          const r = await arofloGet(env, p);
-          const list = r.ok && r.json ? arofloList(r.json) : null;
-          let keys = "";
-          if (list && list.length) keys = arofloFlat(list[0], "", [], 0).map(([k]) => k).slice(0, 30).join(", ");
-          diag.push({ path: p, status: r.status, count: list ? list.length : 0, note: list ? keys : (r.json ? Object.keys(r.json).slice(0, 12).join(", ") : r.text.slice(0, 80)) });
-          if (list && list.length && !best) {
-            const rows = [];
-            for (const rec of list.slice(0, 300)) {
-              const flat = arofloFlat(rec, "", [], 0);
-              const start = lookKey(flat, [/(scheduled|schedule|appointment|booking).*(start|begin|from|time|date)/i, /(^|\.)(start|startTime|startDate|begin)/i]);
-              const end = lookKey(flat, [/(scheduled|schedule|appointment|booking).*(end|finish|to)/i, /(^|\.)(end|endTime|endDate|finish)/i]);
-              const who = lookKey(flat, [/(user|assign|staff|resource|employee|technician|worker).*(name|display)/i, /(user|assign|staff|resource|employee|technician|worker)/i]);
-              const what = lookKey(flat, [/(task|job).*name/i, /(^|\.)(name|title|summary|description)$/i]);
-              const num = lookKey(flat, [/(task|job).*(number|no)$/i, /(^|\.)(number|taskNumber|jobNumber)$/i]);
-              if (start && who) rows.push({ who: String(who).slice(0, 60), start: String(start), end: String(end || ""), what: String(what || "").slice(0, 120), number: String(num || "") });
-            }
-            if (rows.length) best = { path: p, rows };
-          }
-        } catch (e) { diag.push({ path: p, status: 0, count: 0, note: String(e && e.message || e).slice(0, 80) }); }
-      }
-      return reply(env, 200, { ok: !!best, date, source: best ? best.path : "", entries: best ? best.rows : [], diagnostics: diag, worker: WORKER_BUILD });
     }
     if (url.pathname === "/api/aroflo/test") {
       // Defaults to the healthcheck. A different GET path can be tried with ?path=/something, GET only.
@@ -6179,5 +6147,5 @@ export default {
   }
 };
 
-globalThis.w178_BOTTOM = "Reservoir-Worker-2026.10.28-w178";
-// Reservoir-Worker-2026.10.28-w178
+globalThis.w179_BOTTOM = "Reservoir-Worker-2026.10.28-w179";
+// Reservoir-Worker-2026.10.28-w179
