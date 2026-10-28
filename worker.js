@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w174
-globalThis.w174_TOP = "Reservoir-Worker-2026.10.28-w174";
+// Reservoir-Worker-2026.10.28-w175
+globalThis.w175_TOP = "Reservoir-Worker-2026.10.28-w175";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w174";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w175";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2904,6 +2904,7 @@ async function arofloRoutes(request, env, user, url) {
           tries.push([`PATCH ${k} as list of content`, `${coll}/${enc}`, "PATCH", { [k]: [nb] }]);
           tries.push([`PATCH ${k} as content object`, `${coll}/${enc}`, "PATCH", { [k]: nb }]);
         }
+        for (const sub of ["notes/add", "notes/create", "notes/new", "notes/post", "notes/upload", "notes/save", "notes/send", "note/add", "add-note", "addnote", "notes/text", "notes/bulk", "documents/add", "comments/add"]) tries.unshift([`POST ${sub}`, `${coll}/${enc}/${sub}`, "POST", { ...nb, text, note: html, name: text.slice(0, 40) }]);
         for (const p of ["tasknotes", "task-notes", "task_notes", "tasks/notes", "notes/tasks"]) tries.push([`POST ${p}`, `/${p}`, "POST", { ...nb, taskId: id, task: id }]);
         for (const sub of ["activities", "events", "updates", "messages", "history"]) tries.push([`POST ${sub}`, `${coll}/${enc}/${sub}`, "POST", nb]);
         for (const [lab, p, m, b] of tries) { if (ok) break; ok = await tryIt(`note, ${lab}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
@@ -6167,5 +6168,5 @@ export default {
   }
 };
 
-globalThis.w174_BOTTOM = "Reservoir-Worker-2026.10.28-w174";
-// Reservoir-Worker-2026.10.28-w174
+globalThis.w175_BOTTOM = "Reservoir-Worker-2026.10.28-w175";
+// Reservoir-Worker-2026.10.28-w175
