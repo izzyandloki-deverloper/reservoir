@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w173
-globalThis.w173_TOP = "Reservoir-Worker-2026.10.28-w173";
+// Reservoir-Worker-2026.10.28-w174
+globalThis.w174_TOP = "Reservoir-Worker-2026.10.28-w174";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w173";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w174";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2892,8 +2892,21 @@ async function arofloRoutes(request, env, user, url) {
           ["PATCH noteContent", `${coll}/${enc}`, "PATCH", { noteContent: html, noteVisibility: "INTERNAL_ONLY" }],
           ["PATCH inside task", `${coll}/${enc}`, "PATCH", { task: { notes: [nb] } }]
         ];
+        // Look at what the job record itself calls its note fields, then try writing to exactly those names.
+        const rec = await arofloGet(env, `${coll}/${enc}`);
+        const nkeys = [];
+        const walk = (v, pre, d) => { if (!v || typeof v !== "object" || d > 3) return; for (const k of Object.keys(v)) { const path = pre ? pre + "." + k : k; if (/note|comment|message|log|history|activity/i.test(k)) nkeys.push(path + (Array.isArray(v[k]) ? " (list of " + v[k].length + ")" : typeof v[k] === "object" ? " (object)" : "")); if (!Array.isArray(v[k])) walk(v[k], path, d + 1); } };
+        walk(rec.json, "", 0);
+        attempts.push({ label: "note related fields on the job", path: `${coll}/${enc}`, status: rec.status, body: nkeys.slice(0, 20).join(", ") || "none found; top level keys: " + Object.keys(rec.json || {}).slice(0, 40).join(", ") });
+        const top = nkeys.map((k) => k.split(" ")[0]).filter((k) => !k.includes(".")).slice(0, 6);
+        for (const k of top) {
+          tries.push([`PATCH ${k} as text`, `${coll}/${enc}`, "PATCH", { [k]: text }]);
+          tries.push([`PATCH ${k} as list of content`, `${coll}/${enc}`, "PATCH", { [k]: [nb] }]);
+          tries.push([`PATCH ${k} as content object`, `${coll}/${enc}`, "PATCH", { [k]: nb }]);
+        }
+        for (const p of ["tasknotes", "task-notes", "task_notes", "tasks/notes", "notes/tasks"]) tries.push([`POST ${p}`, `/${p}`, "POST", { ...nb, taskId: id, task: id }]);
+        for (const sub of ["activities", "events", "updates", "messages", "history"]) tries.push([`POST ${sub}`, `${coll}/${enc}/${sub}`, "POST", nb]);
         for (const [lab, p, m, b] of tries) { if (ok) break; ok = await tryIt(`note, ${lab}`, p, { method: m, headers: J, body: JSON.stringify(b) }); }
-        if (!ok) for (const p of ["", "/openapi.json", "/swagger.json", "/docs", "/schema", "/tasks/schema"]) await send2("spec lookup", p, { method: "GET" });
       } else {
         const type = request.headers.get("Content-Type") || "image/jpeg";
         const b64 = (() => { const u = new Uint8Array(bytes); let bin = ""; for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(bin); })();
@@ -6154,5 +6167,5 @@ export default {
   }
 };
 
-globalThis.w173_BOTTOM = "Reservoir-Worker-2026.10.28-w173";
-// Reservoir-Worker-2026.10.28-w173
+globalThis.w174_BOTTOM = "Reservoir-Worker-2026.10.28-w174";
+// Reservoir-Worker-2026.10.28-w174
