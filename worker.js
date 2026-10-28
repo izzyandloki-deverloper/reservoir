@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w166
-globalThis.w166_TOP = "Reservoir-Worker-2026.10.28-w166";
+// Reservoir-Worker-2026.10.28-w167
+globalThis.w167_TOP = "Reservoir-Worker-2026.10.28-w167";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w166";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w167";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2938,6 +2938,47 @@ async function arofloRoutes(request, env, user, url) {
       else rows.reverse();
       const top = rows.slice(0, 10).map((x) => ({ id: String((x.rec && (x.rec.id ?? x.rec.projectId ?? x.rec.ID)) ?? x.shape.number ?? x.i), number: x.shape.number, client: x.shape.client, address: x.shape.address, when: x.shape.when, fields: arofloFlat(x.rec, "", [], 0) }));
       return reply(env, 200, { ok: true, status: r.status, total: list.length, orderedBy, steps, meta, lastPage, items: top, worker: WORKER_BUILD });
+    }
+    // One job by its number: client, site address, then its notes and its documents. Read only. AroFlo's v2 paths are not published, so each possible path is tried and what AroFlo answered is reported.
+    if (url.pathname === "/api/aroflo/job") {
+      const want = String(url.searchParams.get("number") || "").trim();
+      if (!want || !/^[A-Za-z0-9_.-]{1,40}$/.test(want)) return reply(env, 400, { error: "Enter a task number" });
+      const steps = [];
+      const idOf = (rec) => String(rec && (rec.id ?? rec.projectId ?? rec.taskId ?? rec.ID) || "");
+      const numOf = (rec) => { const sh = arofloShape(rec); return sh.number; };
+      let coll = "", rec = null, id = "";
+      for (const c of ["/tasks", "/projects", "/jobs"]) {
+        const r = await arofloGet(env, `${c}/${encodeURIComponent(want)}`);
+        steps.push(`${c}/${want} answered ${r.status}`);
+        if (r.ok && r.json && typeof r.json === "object") { coll = c; rec = (r.json.data && typeof r.json.data === "object" && !Array.isArray(r.json.data)) ? r.json.data : r.json; id = idOf(rec) || want; break; }
+      }
+      if (!rec) {
+        for (const c of ["/tasks", "/projects", "/jobs"]) {
+          const first = await arofloGet(env, c);
+          if (!first.ok) { steps.push(`${c} list answered ${first.status}`); continue; }
+          const l0 = arofloList(first.json) || [];
+          const lastPage = arofloLastPage(arofloMeta(first.json), l0.length) || 1;
+          let hit = l0.find((x) => numOf(x) === want || idOf(x) === want);
+          for (let pg = lastPage; !hit && pg >= 1 && pg > lastPage - 8 && lastPage > 1; pg--) {
+            const rp = await arofloGet(env, `${c}?page=${pg}`);
+            const lp = rp.ok ? arofloList(rp.json) : null;
+            if (lp) hit = lp.find((x) => numOf(x) === want || idOf(x) === want);
+          }
+          steps.push(`${c} list searched${hit ? ", found" : ", not found"}`);
+          if (hit) { coll = c; rec = hit; id = idOf(hit) || want; break; }
+        }
+      }
+      if (!rec) return reply(env, 200, { ok: false, steps, worker: WORKER_BUILD });
+      const shape = arofloShape(rec);
+      const pick = (flat, re, skip) => { const f = flat.find(([k, v]) => re.test(k) && !(skip && skip.test(k)) && v !== "" && v !== "(empty list)"); return f ? String(f[1]) : ""; };
+      const subs = {};
+      for (const seg of ["notes", "documents", "attachments", "files", "photos"]) {
+        const r = await arofloGet(env, `${coll}/${encodeURIComponent(id)}/${seg}`);
+        const list = r.ok ? arofloList(r.json) : null;
+        steps.push(`${coll}/${id}/${seg} answered ${r.status}${list ? `, ${list.length} items` : r.ok ? ", no list" : ""}`);
+        if (list) subs[seg] = list.slice(0, 50).map((it) => { const flat = arofloFlat(it, "", [], 0); return { text: pick(flat, /(note|text|body|comment|message|content|description)/i, /(id|by|date|time)$/i), by: pick(flat, /(user|author|createdby|by|name)/i, /(file|note|doc)/i), when: pick(flat, /(date|created|when|time)/i), name: pick(flat, /(file.*name|name|title)/i), url: pick(flat, /(url|link|href)/i), fields: flat.slice(0, 14) }; });
+      }
+      return reply(env, 200, { ok: true, collection: coll, id, number: shape.number || want, client: shape.client, address: shape.address, fields: arofloFlat(rec, "", [], 0).slice(0, 60), notes: subs.notes || [], documents: subs.documents || subs.attachments || subs.files || subs.photos || [], haveNotes: !!subs.notes, haveDocs: !!(subs.documents || subs.attachments || subs.files || subs.photos), steps, worker: WORKER_BUILD });
     }
     // One project pulled raw. Lists every field AroFlo sends for it.
     if (url.pathname === "/api/aroflo/project") {
@@ -5959,5 +6000,5 @@ export default {
   }
 };
 
-globalThis.w166_BOTTOM = "Reservoir-Worker-2026.10.28-w166";
-// Reservoir-Worker-2026.10.28-w166
+globalThis.w167_BOTTOM = "Reservoir-Worker-2026.10.28-w167";
+// Reservoir-Worker-2026.10.28-w167
