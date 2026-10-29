@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w192
-globalThis.w192_TOP = "Reservoir-Worker-2026.10.28-w192";
+// Reservoir-Worker-2026.10.28-w193
+globalThis.w193_TOP = "Reservoir-Worker-2026.10.28-w193";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w192";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w193";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3028,6 +3028,7 @@ async function mailRoutes(request, env, user, url) {
 }
 // Looks for mail that arrived since the last look and tells everyone who has access. The first look only marks the time, so nothing floods in.
 async function mailWatch(env) {
+  return; // New mail notifications are switched off. Remove this line to turn them back on.
   if (!env.GRAPH_CLIENT_SECRET) return;
   await settingsTable(env);
   const tiers = await accessTiers(env);
@@ -6506,5 +6507,5 @@ export default {
   }
 };
 
-globalThis.w192_BOTTOM = "Reservoir-Worker-2026.10.28-w192";
-// Reservoir-Worker-2026.10.28-w192
+globalThis.w193_BOTTOM = "Reservoir-Worker-2026.10.28-w193";
+// Reservoir-Worker-2026.10.28-w193
