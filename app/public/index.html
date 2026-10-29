@@ -14,8 +14,8 @@
 </head>
 <body>
 <div id="root"></div>
-<div id="rsv-fail" style="display:none;box-sizing:border-box;min-height:100vh;padding:56px 24px;background:#434343;color:#fff;font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:16px;line-height:1.45">Reservoir did not load.<br><br>Close the app and open it again. If it keeps happening, send Tayler a screenshot of this screen.<br><br><span style="font-size:12px;color:#aaa">Full-Reservoir-2026.10.29-v8</span><br><br><span id="rsv-why" style="font-size:11px;color:#8c8c8c;word-break:break-word"></span></div>
+<div id="rsv-fail" style="display:none;box-sizing:border-box;min-height:100vh;padding:56px 24px;background:#434343;color:#fff;font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:16px;line-height:1.45">Reservoir did not load.<br><br>Close the app and open it again. If it keeps happening, send Tayler a screenshot of this screen.<br><br><span style="font-size:12px;color:#aaa">Full-Reservoir-2026.10.29-v9</span><br><br><span id="rsv-why" style="font-size:11px;color:#8c8c8c;word-break:break-word"></span></div>
 <script>window.rsvErr="";window.rsvShow=function(){var r=document.getElementById("root"),f=document.getElementById("rsv-fail");if(f&&r&&!r.firstChild){if(window.rsvErr){var d=document.getElementById("rsv-why");if(d)d.textContent=window.rsvErr}f.style.display="block"}};window.addEventListener("error",function(e){window.rsvErr=String(e.message||"error")+(e.filename?" ("+String(e.filename).split("/").pop()+":"+e.lineno+")":"");window.rsvShow()});window.addEventListener("unhandledrejection",function(e){window.rsvErr=String(e.reason&&(e.reason.message||e.reason));window.rsvShow()});(function(){var r=document.getElementById("root");if(r&&window.MutationObserver){new MutationObserver(function(){var f=document.getElementById("rsv-fail");if(r.firstChild&&f)f.style.display="none"}).observe(r,{childList:true})}})();setTimeout(window.rsvShow,30000)</script>
-<script src="Full-Reservoir-2026.10.29-v8.js" onerror="window.rsvShow()"></script>
+<script src="Full-Reservoir-2026.10.29-v9.js" onerror="window.rsvShow()"></script>
 </body>
 </html>
