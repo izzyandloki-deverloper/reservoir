@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w193
-globalThis.w193_TOP = "Reservoir-Worker-2026.10.28-w193";
+// Reservoir-Worker-2026.10.28-w194
+globalThis.w194_TOP = "Reservoir-Worker-2026.10.28-w194";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w193";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w194";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -4045,7 +4045,9 @@ async function noticesRoutes(request, env, user, url) {
     return reply(env, 200, { notices: rows.map(noticeOut), worker: WORKER_BUILD });
   }
   if (url.pathname === "/api/notices/read-all" && request.method === "POST") {
-    await env.DB.prepare("UPDATE notices SET read_at = datetime('now') WHERE to_email = ? AND read_at IS NULL AND todo = 0").bind(email).run();
+    const b = await request.json().catch(() => ({}));
+    if (b && b.clear) await env.DB.prepare(`UPDATE notices SET read_at = COALESCE(read_at, datetime('now')), done_at = CASE WHEN todo = 1 THEN COALESCE(done_at, datetime('now')) ELSE done_at END, done_by = CASE WHEN todo = 1 THEN COALESCE(done_by, ?) ELSE done_by END WHERE ${mine} AND (read_at IS NULL OR (todo = 1 AND done_at IS NULL))`).bind(user.name || email, email).run();
+    else await env.DB.prepare(`UPDATE notices SET read_at = datetime('now') WHERE ${mine} AND read_at IS NULL AND todo = 0`).bind(email).run();
     return reply(env, 200, { ok: true });
   }
   const m = url.pathname.match(/^\/api\/notices\/([0-9a-zA-Z-]{1,40})\/(read|done)$/);
@@ -6507,5 +6509,5 @@ export default {
   }
 };
 
-globalThis.w193_BOTTOM = "Reservoir-Worker-2026.10.28-w193";
-// Reservoir-Worker-2026.10.28-w193
+globalThis.w194_BOTTOM = "Reservoir-Worker-2026.10.28-w194";
+// Reservoir-Worker-2026.10.28-w194
