@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w188
-globalThis.w188_TOP = "Reservoir-Worker-2026.10.28-w188";
+// Reservoir-Worker-2026.10.28-w189
+globalThis.w189_TOP = "Reservoir-Worker-2026.10.28-w189";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w188";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w189";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3261,7 +3261,22 @@ async function arofloRoutes(request, env, user, url) {
       const items = rows.filter((x) => wanted.includes(String(x.suburb).toLowerCase())).map((x) => ({ suburb: String(x.suburb).toLowerCase(), number: x.number, client: x.client, address: x.address || x.name, status: x.status, extra: x.extra || "", id: x.id }));
       const pend = await env.DB.prepare(pendingQ).first();
       const totalOpen = await env.DB.prepare("SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN'").first();
-      return reply(env, 200, { ok: true, items, pending: pend ? pend.n : 0, totalOpen: totalOpen ? totalOpen.n : 0, worker: WORKER_BUILD });
+      // Where do the custom fields (Consent Number, HC/PS Number, BPC Certificate Number) come from? Try the likely routes on one open project and say what each one answered.
+      let probe = "";
+      if (url.searchParams.get("probe") && rows.length) {
+        const pid = encodeURIComponent(rows[0].id);
+        const tries = [`/projects/${pid}/customFields`, `/projects/${pid}/custom-fields`, `/projects/${pid}/userDefinedFields`, `/projects/${pid}?include=customFields`, `/projects/${pid}?expand=customFields`, `/projects/${pid}?fields=customFields`, `/projects/${pid}/custom`, `/customFields`, `/projects/customFields`, `/customFields?entity=PROJECT`];
+        const out = await Promise.all(tries.map(async (t) => {
+          try {
+            const r = await arofloGet(env, t);
+            const body = r.json ? JSON.stringify(r.json) : String(r.text || "");
+            const at = body.search(/consent|hc\/ps|bpc/i);
+            return `${t} ${r.status}${at >= 0 ? " HAS IT: " + body.slice(Math.max(0, at - 60), at + 160) : " " + body.slice(0, 70)}`;
+          } catch (e) { return `${t} failed`; }
+        }));
+        probe = out.join("  ///  ");
+      }
+      return reply(env, 200, { ok: true, items, pending: pend ? pend.n : 0, totalOpen: totalOpen ? totalOpen.n : 0, probe, worker: WORKER_BUILD });
     }
     if (url.pathname === "/api/aroflo/projects") {
       const r = await arofloGet(env, "/projects");
@@ -6443,5 +6458,5 @@ export default {
   }
 };
 
-globalThis.w188_BOTTOM = "Reservoir-Worker-2026.10.28-w188";
-// Reservoir-Worker-2026.10.28-w188
+globalThis.w189_BOTTOM = "Reservoir-Worker-2026.10.28-w189";
+// Reservoir-Worker-2026.10.28-w189
