@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w187
-globalThis.w187_TOP = "Reservoir-Worker-2026.10.28-w187";
+// Reservoir-Worker-2026.10.28-w188
+globalThis.w188_TOP = "Reservoir-Worker-2026.10.28-w188";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w187";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w188";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3206,61 +3206,62 @@ async function arofloRoutes(request, env, user, url) {
       return reply(env, 200, { ok: r.ok, status: r.status, path, contentType: r.contentType, body: shown, worker: WORKER_BUILD });
     }
     // The 10 newest projects. Asks AroFlo for the project list, keeps the newest 10 (by a created or added date when the records have one, otherwise by the highest id), and shapes each for the card.
-    // Active projects in chosen suburbs (recycled water areas). Reads AroFlo's project pages newest first, up to 40 pages in one go, and matches the suburb names anywhere in the project's own address fields.
+    // Open projects by suburb. AroFlo's project list has no suburb, only a full project record does. So the list is read in pages and kept in D1, then open projects without a suburb yet are read one by one in batches of 40 (a Worker can only make about 50 calls at a time), and the report is built from D1. After the first full run only new projects need reading.
     if (url.pathname === "/api/aroflo/suburbs") {
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS aroflo_projects (id TEXT PRIMARY KEY, number TEXT, name TEXT, client TEXT, status TEXT, suburb TEXT, address TEXT, state TEXT, extra TEXT, seen TEXT)").run();
+      const mode = String(url.searchParams.get("mode") || "report");
+      const pendingQ = "SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL";
+      if (mode === "refresh") {
+        const r1 = await arofloGet(env, "/projects");
+        const l1 = r1.ok ? arofloList(r1.json) : null;
+        if (!l1) return reply(env, 200, { ok: false, error: `AroFlo answered ${r1.status} for the project list.`, worker: WORKER_BUILD });
+        const last = arofloLastPage(arofloMeta(r1.json), l1.length) || 1;
+        const pages = [];
+        for (let pg = last; pg >= 1 && pages.length < 30; pg--) pages.push(pg);
+        const all = [];
+        let failed = 0;
+        for (let k = 0; k < pages.length; k += 10) {
+          const got = await Promise.all(pages.slice(k, k + 10).map(async (pg) => {
+            try { if (pg === 1) return l1; const rp = await arofloGet(env, "/projects?page=" + pg); return rp.ok ? arofloList(rp.json) || [] : (failed++, []); } catch (e) { failed++; return []; }
+          }));
+          got.forEach((g) => all.push(...g));
+        }
+        const stmts = [];
+        for (const rec of all) {
+          const id = String((rec && (rec.id ?? rec.projectId ?? rec.ID)) ?? "");
+          if (!id) continue;
+          const loc = rec.location && typeof rec.location === "object" ? rec.location : null;
+          stmts.push(env.DB.prepare("INSERT INTO aroflo_projects (id, number, name, client, status, suburb, seen) VALUES (?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(id) DO UPDATE SET number = excluded.number, name = excluded.name, client = excluded.client, status = excluded.status, seen = excluded.seen").bind(id, String(rec.projectNumber ?? rec.referenceNumber ?? ""), String(rec.name || ""), String((rec.client && rec.client.name) || ""), String(rec.status || ""), loc && loc.suburb ? String(loc.suburb) : null));
+        }
+        for (let k = 0; k < stmts.length; k += 90) await env.DB.batch(stmts.slice(k, k + 90));
+        const pend = await env.DB.prepare(pendingQ).first();
+        return reply(env, 200, { ok: true, scanned: all.length, pagesRead: pages.length, lastPage: last, partial: last > pages.length, failedPages: failed, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
+      }
+      if (mode === "detail") {
+        const rows = (await env.DB.prepare("SELECT id FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL LIMIT 40").all()).results || [];
+        let done = 0, failed = 0;
+        for (let k = 0; k < rows.length; k += 10) {
+          await Promise.all(rows.slice(k, k + 10).map(async (row) => {
+            try {
+              const rd = await arofloGet(env, "/projects/" + encodeURIComponent(row.id));
+              if (!rd.ok || !rd.json) { failed++; return; }
+              const loc = rd.json.location || {};
+              const extra = arofloFlat(rd.json, "", [], 0).filter(([k2, v]) => v !== "" && /consent|heps|custom/i.test(k2 + " " + v)).slice(0, 12).map(([k2, v]) => `${k2.split(".").slice(-2).join(".")}=${String(v).slice(0, 40)}`).join(" | ");
+              await env.DB.prepare("UPDATE aroflo_projects SET suburb = ?, address = ?, state = ?, extra = ? WHERE id = ?").bind(String(loc.suburb || ""), String(loc.address1 || ""), String(loc.state || ""), extra, row.id).run();
+              done++;
+            } catch (e) { failed++; }
+          }));
+        }
+        const pend = await env.DB.prepare(pendingQ).first();
+        return reply(env, 200, { ok: true, done, failed, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
+      }
       const wanted = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
       if (!wanted.length) return reply(env, 400, { error: "no suburbs" });
-      const r1 = await arofloGet(env, "/projects");
-      const l1 = r1.ok ? arofloList(r1.json) : null;
-      if (!l1) return reply(env, 200, { ok: false, error: `AroFlo answered ${r1.status} for the project list.`, worker: WORKER_BUILD });
-      const last = arofloLastPage(arofloMeta(r1.json), l1.length) || 1;
-      const pages = [];
-      for (let pg = last; pg >= 1 && pages.length < 40; pg--) pages.push(pg);
-      const all = [];
-      let failed = 0;
-      for (let i = 0; i < pages.length; i += 10) {
-        const got = await Promise.all(pages.slice(i, i + 10).map(async (pg) => {
-          try { if (pg === 1) return l1; const rp = await arofloGet(env, "/projects?page=" + pg); return rp.ok ? arofloList(rp.json) || [] : (failed++, []); } catch (e) { failed++; return []; }
-        }));
-        got.forEach((g) => all.push(...g));
-      }
-      const statusCount = {};
-      const samples = [];
-      const items = [];
-      for (const rec of all) {
-        const flat = arofloFlat(rec, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)");
-        const st = (flat.find(([k]) => /(^|\.)(status|state|stage|projectstatus)$/i.test(k)) || [])[1] || "";
-        statusCount[st || "(none)"] = (statusCount[st || "(none)"] || 0) + 1;
-        if (samples.length < 2 && /open/i.test(st)) samples.push(flat.slice(0, 60).map(([k, v]) => `${k}=${String(v).slice(0, 50)}`).join(" | "));
-        // Any field at all that is exactly one of the suburbs (or holds it as a whole word), so it does not matter what AroFlo calls the field.
-        let hit = "", hitKey = "";
-        for (const [k, v] of flat) {
-          const lv = String(v).toLowerCase();
-          const w = wanted.find((x) => lv === x || new RegExp("(^|[^a-z])" + x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z]|$)").test(lv));
-          if (w) { hit = w; hitKey = k; break; }
-        }
-        if (!hit) continue;
-        const addrVals = flat.filter(([k]) => /address|street|suburb|city|town|location|site/i.test(k) && !/email|url/i.test(k)).map(([, v]) => String(v));
-        const sh = arofloShape(rec);
-        items.push({ suburb: hit, number: sh.number, client: sh.client, address: Array.from(new Set(addrVals)).slice(0, 4).join(", ") || hitKey, status: st, matchedOn: hitKey, id: String((rec && (rec.id ?? rec.projectId ?? rec.ID)) ?? "") });
-      }
-      // One open project read in full, so the field names for suburb, consent number and HEPS number can be seen.
-      try {
-        const first = all.find((x) => /open/i.test(String((arofloFlat(x, "", [], 0).find(([k]) => /(^|\.)(status|state|stage)$/i.test(k)) || [])[1] || "")));
-        const pid = first && (first.id ?? first.projectId ?? first.ID);
-        if (pid !== undefined) {
-          const rd = await arofloGet(env, "/projects/" + encodeURIComponent(String(pid)));
-          if (rd.json) {
-            const fl = arofloFlat(rd.json, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)");
-            const pick = fl.filter(([k, v]) => /suburb|consent|heps|custom|address|locat|site|street|city|town|postcode/i.test(k + " " + v)).slice(0, 25);
-            samples.length = 0;
-            samples.push(`Project has ${fl.length} filled fields. Likely ones: ` + pick.map(([k, v]) => `${k.split(".").slice(-3).join(".")}=${String(v).slice(0, 30)}`).join(", "));
-          }
-        }
-      } catch (e) { /* the sample is a bonus */ }
-      const dead = /(complete|closed|cancel|invoice|archiv|finish|done|lost|declin)/i;
-      const active = items.filter((x) => !dead.test(x.status));
-      return reply(env, 200, { ok: true, scanned: all.length, pagesRead: pages.length, lastPage: last, failedPages: failed, partial: last > pages.length, statuses: statusCount, samples, found: items.length, items: active, worker: WORKER_BUILD });
+      const rows = (await env.DB.prepare("SELECT id, number, name, client, status, suburb, address, state, extra FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NOT NULL ORDER BY CAST(number AS INTEGER) DESC").all()).results || [];
+      const items = rows.filter((x) => wanted.includes(String(x.suburb).toLowerCase())).map((x) => ({ suburb: String(x.suburb).toLowerCase(), number: x.number, client: x.client, address: x.address || x.name, status: x.status, extra: x.extra || "", id: x.id }));
+      const pend = await env.DB.prepare(pendingQ).first();
+      const totalOpen = await env.DB.prepare("SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN'").first();
+      return reply(env, 200, { ok: true, items, pending: pend ? pend.n : 0, totalOpen: totalOpen ? totalOpen.n : 0, worker: WORKER_BUILD });
     }
     if (url.pathname === "/api/aroflo/projects") {
       const r = await arofloGet(env, "/projects");
@@ -6442,5 +6443,5 @@ export default {
   }
 };
 
-globalThis.w187_BOTTOM = "Reservoir-Worker-2026.10.28-w187";
-// Reservoir-Worker-2026.10.28-w187
+globalThis.w188_BOTTOM = "Reservoir-Worker-2026.10.28-w188";
+// Reservoir-Worker-2026.10.28-w188
