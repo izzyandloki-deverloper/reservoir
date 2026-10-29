@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w180
-globalThis.w180_TOP = "Reservoir-Worker-2026.10.28-w180";
+// Reservoir-Worker-2026.10.28-w181
+globalThis.w181_TOP = "Reservoir-Worker-2026.10.28-w181";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w180";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w181";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2841,7 +2841,18 @@ async function mailGraph(env, address, qs) {
   try { json = JSON.parse(text); } catch (e) { json = null; }
   return { ok: res.ok, status: res.status, json, text };
 }
-const mailWhy = (r) => r.status === 403 || r.status === 401 ? "Reservoir's Microsoft app does not have permission to read this mailbox yet. The Mail.Read application permission needs adding and approving in Entra." : r.status === 404 ? "Microsoft could not find this mailbox." : `Microsoft answered ${r.status}.`;
+const mailWhy = (r) => {
+  let who = "";
+  try {
+    const c = JSON.parse(atob(String(graphToken.value).split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    const mailRoles = (c.roles || []).filter((x) => /^Mail|^MailboxSettings/.test(x));
+    who = ` Reservoir signs in to Microsoft as app ${c.appid || c.azp || "unknown"}, and its token holds these mail permissions: ${mailRoles.join(", ") || "none"}.`;
+  } catch (e) { who = ""; }
+  const code = r.json && r.json.error && r.json.error.code ? ` Microsoft said ${r.json.error.code}.` : "";
+  if (r.status === 403 || r.status === 401) return "Reservoir's Microsoft app is not allowed to read this mailbox yet." + code + who;
+  if (r.status === 404) return "Microsoft could not find this mailbox." + code;
+  return `Microsoft answered ${r.status}.` + code;
+};
 async function mailRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/mail")) return null;
   if (request.method !== "GET") return reply(env, 404, { error: "not found" });
@@ -6216,5 +6227,5 @@ export default {
   }
 };
 
-globalThis.w180_BOTTOM = "Reservoir-Worker-2026.10.28-w180";
-// Reservoir-Worker-2026.10.28-w180
+globalThis.w181_BOTTOM = "Reservoir-Worker-2026.10.28-w181";
+// Reservoir-Worker-2026.10.28-w181
