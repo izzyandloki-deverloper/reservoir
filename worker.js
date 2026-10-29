@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w182
-globalThis.w182_TOP = "Reservoir-Worker-2026.10.28-w182";
+// Reservoir-Worker-2026.10.28-w183
+globalThis.w183_TOP = "Reservoir-Worker-2026.10.28-w183";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w182";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w183";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2855,6 +2855,7 @@ const mailWhy = (r) => {
 };
 // ---- Access (T1 only). Who has which tier, changing it in Entra, and tiles switched off per person. ----
 async function accessTable(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS temp_access (email TEXT PRIMARY KEY, tier TEXT NOT NULL, until TEXT, by_name TEXT, at TEXT DEFAULT (datetime('now')))").run();
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS tile_overrides (email TEXT NOT NULL, tile_id TEXT NOT NULL, by_name TEXT, at TEXT DEFAULT (datetime('now')), PRIMARY KEY (email, tile_id))").run();
 }
 async function accessGraph(env, path, init) {
@@ -2865,15 +2866,32 @@ async function accessGraph(env, path, init) {
   try { json = JSON.parse(text); } catch (e) { json = null; }
   return { ok: res.ok, status: res.status, json, text };
 }
+// Temporary access. A person can be lifted to a better level until 4pm Melbourne time on the end date. Past that moment the row is ignored.
+function tempAccessLive(row) {
+  if (!row || !row.tier) return false;
+  if (!row.until) return true;
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Melbourne", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false }).formatToParts(new Date());
+  const g = (t) => (parts.find((x) => x.type === t) || {}).value;
+  const day = `${g("year")}-${g("month")}-${g("day")}`;
+  const hour = Number(g("hour")) % 24;
+  return day < row.until || (day === row.until && hour < 16);
+}
+async function tempAccessFor(env, email) {
+  try {
+    const row = await env.DB.prepare("SELECT tier, until FROM temp_access WHERE email = ?").bind(String(email || "").toLowerCase()).first();
+    return tempAccessLive(row) ? row : null;
+  } catch (e) { return null; }
+}
 async function accessRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/access") && url.pathname !== "/api/mytiles") return null;
   if (url.pathname === "/api/mytiles") {
     if (request.method !== "GET") return reply(env, 404, { error: "not found" });
     await accessTable(env);
     const rows = await env.DB.prepare("SELECT tile_id FROM tile_overrides WHERE email = ?").bind(String(user.email || "").toLowerCase()).all();
-    return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), worker: WORKER_BUILD });
+    const tmp = await tempAccessFor(env, user.email);
+    return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), temp: tmp ? { tier: tmp.tier, until: tmp.until || "" } : null, worker: WORKER_BUILD });
   }
-  if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
+  if (user.realUser ? user.realUser.tier !== "T1" : user.tier !== "T1" || user.tempTier) return reply(env, 403, { error: "forbidden" });
   try {
     await accessTable(env);
     const sp = (await accessGraph(env, `/servicePrincipals?$filter=appId eq '${env.CLIENT_ID}'&$select=id,appRoles`));
@@ -2922,6 +2940,10 @@ async function accessRoutes(request, env, user, url) {
       const offBy = {};
       (off.results || []).forEach((r) => { offBy[r.email] = r.n; });
       out.forEach((p) => { p.tilesOff = offBy[p.email] || 0; });
+      const tmpRows = await env.DB.prepare("SELECT email, tier, until FROM temp_access").all();
+      const tmpBy = {};
+      (tmpRows.results || []).forEach((r) => { if (tempAccessLive(r)) tmpBy[r.email] = r.tier; });
+      out.forEach((p) => { p.temp = tmpBy[p.email] || ""; });
       return reply(env, 200, { ok: true, people: out, roles: Object.keys(idOf).sort(), worker: WORKER_BUILD });
     }
     if (url.pathname === "/api/access/tier" && request.method === "POST") {
@@ -2952,7 +2974,19 @@ async function accessRoutes(request, env, user, url) {
     if (url.pathname === "/api/access/tiles" && request.method === "GET") {
       const email = String(url.searchParams.get("email") || "").toLowerCase();
       const rows = await env.DB.prepare("SELECT tile_id FROM tile_overrides WHERE email = ?").bind(email).all();
-      return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), worker: WORKER_BUILD });
+      const t = await env.DB.prepare("SELECT tier, until FROM temp_access WHERE email = ?").bind(email).first();
+      return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), temp: t && tempAccessLive(t) ? { tier: t.tier, until: t.until || "" } : null, worker: WORKER_BUILD });
+    }
+    if (url.pathname === "/api/access/temp" && request.method === "POST") {
+      const b = await request.json().catch(() => ({}));
+      const email = String(b.email || "").toLowerCase();
+      const tier = String(b.tier || "");
+      const until = String(b.until || "");
+      if (!email || (tier && !idOf[tier]) || (until && !/^\d{4}-\d{2}-\d{2}$/.test(until))) return reply(env, 400, { error: "bad request" });
+      if (email === String(user.email || "").toLowerCase()) return reply(env, 200, { ok: false, error: "You cannot lift your own level." });
+      if (!tier) await env.DB.prepare("DELETE FROM temp_access WHERE email = ?").bind(email).run();
+      else await env.DB.prepare("INSERT INTO temp_access (email, tier, until, by_name) VALUES (?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET tier = excluded.tier, until = excluded.until, by_name = excluded.by_name, at = datetime('now')").bind(email, tier, until || null, user.name || "").run();
+      return reply(env, 200, { ok: true, tier, until, worker: WORKER_BUILD });
     }
     if (url.pathname === "/api/access/tiles" && request.method === "POST") {
       const b = await request.json().catch(() => ({}));
@@ -4617,6 +4651,13 @@ export default {
       if (request.method !== "GET") return reply(env, 403, { error: "Viewing as someone else is read only." });
       console.log("view as", user.email, "->", String(v.e).toLowerCase(), v.t);
       user = { tier: v.t, name: String(v.n || ""), email: String(v.e).toLowerCase(), viewAs: true, realUser: user };
+    }
+
+    // Temporary access lifts the caller to a better level until 4pm on the end date. Not while viewing as someone else, where the app states the level.
+    if (!user.viewAs) {
+      const tmp = await tempAccessFor(env, user.email);
+      const rk = { T1: 1, T2: 2, T3: 3, T4: 4, T5: 5 };
+      if (tmp && rk[tmp.tier] && rk[tmp.tier] < (rk[user.tier] || 9)) user = { ...user, tier: tmp.tier, tempTier: true };
     }
 
     // From here on every call carries the caller's access level, which is what the Xero gate reads. A level that is missing or unknown is treated as closed.
@@ -6345,5 +6386,5 @@ export default {
   }
 };
 
-globalThis.w182_BOTTOM = "Reservoir-Worker-2026.10.28-w182";
-// Reservoir-Worker-2026.10.28-w182
+globalThis.w183_BOTTOM = "Reservoir-Worker-2026.10.28-w183";
+// Reservoir-Worker-2026.10.28-w183
