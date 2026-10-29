@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w190
-globalThis.w190_TOP = "Reservoir-Worker-2026.10.28-w190";
+// Reservoir-Worker-2026.10.28-w191
+globalThis.w191_TOP = "Reservoir-Worker-2026.10.28-w191";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w190";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w191";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3254,22 +3254,23 @@ async function arofloRoutes(request, env, user, url) {
         const rows = (await env.DB.prepare("SELECT id FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL LIMIT 40").all()).results || [];
         let done = 0, failed = 0;
         let limited = false;
+        let firstErr = "";
         for (let k = 0; k < rows.length && !limited; k += 4) {
           await Promise.all(rows.slice(k, k + 4).map(async (row) => {
             try {
               const rd = await arofloGet(env, "/projects/" + encodeURIComponent(row.id));
               if (rd.status === 429) { limited = true; return; }
-              if (!rd.ok || !rd.json) { failed++; return; }
+              if (!rd.ok || !rd.json) { failed++; if (!firstErr) firstErr = `project ${row.id} answered ${rd.status} ${String(rd.text || "").slice(0, 120)}`; return; }
               const loc = rd.json.location || {};
               const extra = arofloFlat(rd.json, "", [], 0).filter(([k2, v]) => v !== "" && /consent|heps|custom/i.test(k2 + " " + v)).slice(0, 12).map(([k2, v]) => `${k2.split(".").slice(-2).join(".")}=${String(v).slice(0, 40)}`).join(" | ");
               await env.DB.prepare("UPDATE aroflo_projects SET suburb = ?, address = ?, state = ?, extra = ? WHERE id = ?").bind(String(loc.suburb || ""), String(loc.address1 || ""), String(loc.state || ""), extra, row.id).run();
               done++;
-            } catch (e) { failed++; }
+            } catch (e) { failed++; if (!firstErr) firstErr = String(e && e.message || e).slice(0, 160); }
           }));
           await new Promise((r) => setTimeout(r, 250));
         }
         const pend = await env.DB.prepare(pendingQ).first();
-        return reply(env, 200, { ok: true, done, failed, limited, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
+        return reply(env, 200, { ok: true, done, failed, limited, firstErr, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
       }
       const wanted = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
       if (!wanted.length) return reply(env, 400, { error: "no suburbs" });
@@ -6474,5 +6475,5 @@ export default {
   }
 };
 
-globalThis.w190_BOTTOM = "Reservoir-Worker-2026.10.28-w190";
-// Reservoir-Worker-2026.10.28-w190
+globalThis.w191_BOTTOM = "Reservoir-Worker-2026.10.28-w191";
+// Reservoir-Worker-2026.10.28-w191
