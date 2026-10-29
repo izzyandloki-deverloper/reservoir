@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w191
-globalThis.w191_TOP = "Reservoir-Worker-2026.10.28-w191";
+// Reservoir-Worker-2026.10.28-w192
+globalThis.w192_TOP = "Reservoir-Worker-2026.10.28-w192";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w191";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w192";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3209,7 +3209,9 @@ async function arofloRoutes(request, env, user, url) {
     // Open projects by suburb. AroFlo's project list has no suburb, only a full project record does. So the list is read in pages and kept in D1, then open projects without a suburb yet are read one by one in batches of 40 (a Worker can only make about 50 calls at a time), and the report is built from D1. After the first full run only new projects need reading.
     if (url.pathname === "/api/aroflo/suburbs") {
       await env.DB.prepare("CREATE TABLE IF NOT EXISTS aroflo_projects (id TEXT PRIMARY KEY, number TEXT, name TEXT, client TEXT, status TEXT, suburb TEXT, address TEXT, state TEXT, extra TEXT, seen TEXT)").run();
+      try { await env.DB.prepare("ALTER TABLE aroflo_projects ADD COLUMN custom TEXT").run(); } catch (e) { /* already there */ }
       const mode = String(url.searchParams.get("mode") || "report");
+      const wantedAll = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
       const pendingQ = "SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL";
       if (mode === "refresh") {
         const pend0 = await env.DB.prepare(pendingQ).first();
@@ -3272,10 +3274,39 @@ async function arofloRoutes(request, env, user, url) {
         const pend = await env.DB.prepare(pendingQ).first();
         return reply(env, 200, { ok: true, done, failed, limited, firstErr, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
       }
-      const wanted = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
+      if (mode === "custom") {
+        if (!wantedAll.length) return reply(env, 400, { error: "no suburbs" });
+        const marks = wantedAll.map(() => "?").join(",");
+        const rows = (await env.DB.prepare(`SELECT id FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND custom IS NULL AND LOWER(suburb) IN (${marks}) LIMIT 24`).bind(...wantedAll).all()).results || [];
+        let done = 0, failed = 0, limited = false, firstErr = "";
+        for (let k = 0; k < rows.length && !limited; k += 4) {
+          await Promise.all(rows.slice(k, k + 4).map(async (row) => {
+            try {
+              const rc = await arofloGet(env, "/projects/" + encodeURIComponent(row.id) + "/customFields");
+              if (rc.status === 429) { limited = true; return; }
+              if (!rc.ok) { failed++; if (!firstErr) firstErr = `custom fields for ${row.id} answered ${rc.status}`; return; }
+              const out = {};
+              for (const it of arofloList(rc.json) || []) {
+                const cf = (it && it.customField) || it || {};
+                const nm = String(cf.name || "");
+                const val = String(cf.value ?? it.value ?? "").trim();
+                if (/consent/i.test(nm)) out.consent = val;
+                else if (/hc\/?ps|heps|hc.?ps/i.test(nm)) out.hcps = val;
+                else if (/bpc/i.test(nm)) out.bpc = val;
+              }
+              await env.DB.prepare("UPDATE aroflo_projects SET custom = ? WHERE id = ?").bind(JSON.stringify(out), row.id).run();
+              done++;
+            } catch (e) { failed++; if (!firstErr) firstErr = String(e && e.message || e).slice(0, 160); }
+          }));
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        const pendC = await env.DB.prepare(`SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND custom IS NULL AND LOWER(suburb) IN (${marks})`).bind(...wantedAll).first();
+        return reply(env, 200, { ok: true, done, failed, limited, firstErr, pending: pendC ? pendC.n : 0, worker: WORKER_BUILD });
+      }
+      const wanted = wantedAll;
       if (!wanted.length) return reply(env, 400, { error: "no suburbs" });
-      const rows = (await env.DB.prepare("SELECT id, number, name, client, status, suburb, address, state, extra FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NOT NULL ORDER BY CAST(number AS INTEGER) DESC").all()).results || [];
-      const items = rows.filter((x) => wanted.includes(String(x.suburb).toLowerCase())).map((x) => ({ suburb: String(x.suburb).toLowerCase(), number: x.number, client: x.client, address: x.address || x.name, status: x.status, extra: x.extra || "", id: x.id }));
+      const rows = (await env.DB.prepare("SELECT id, number, name, client, status, suburb, address, state, extra, custom FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NOT NULL ORDER BY CAST(number AS INTEGER) DESC").all()).results || [];
+      const items = rows.filter((x) => wanted.includes(String(x.suburb).toLowerCase())).map((x) => ({ suburb: String(x.suburb).toLowerCase(), number: x.number, client: x.client, address: x.address || x.name, status: x.status, extra: x.extra || "", consent: (() => { try { return JSON.parse(x.custom || "{}").consent || ""; } catch (e) { return ""; } })(), hcps: (() => { try { return JSON.parse(x.custom || "{}").hcps || ""; } catch (e) { return ""; } })(), bpc: (() => { try { return JSON.parse(x.custom || "{}").bpc || ""; } catch (e) { return ""; } })(), id: x.id }));
       const pend = await env.DB.prepare(pendingQ).first();
       const totalOpen = await env.DB.prepare("SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN'").first();
       // Where do the custom fields (Consent Number, HC/PS Number, BPC Certificate Number) come from? Try the likely routes on one open project and say what each one answered.
@@ -6475,5 +6506,5 @@ export default {
   }
 };
 
-globalThis.w191_BOTTOM = "Reservoir-Worker-2026.10.28-w191";
-// Reservoir-Worker-2026.10.28-w191
+globalThis.w192_BOTTOM = "Reservoir-Worker-2026.10.28-w192";
+// Reservoir-Worker-2026.10.28-w192
