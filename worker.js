@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w181
-globalThis.w181_TOP = "Reservoir-Worker-2026.10.28-w181";
+// Reservoir-Worker-2026.10.28-w182
+globalThis.w182_TOP = "Reservoir-Worker-2026.10.28-w182";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -39,7 +39,7 @@ async function verifyToken(request, env) {
   const issOk = claims.iss === `https://login.microsoftonline.com/${env.TENANT_ID}/v2.0` || claims.iss === `https://sts.windows.net/${env.TENANT_ID}/`;
   if (!issOk) throw new Error("iss");
   const roles = Array.isArray(claims.roles) ? claims.roles : [];
-  const tier = ["T1", "T2", "T3"].find((t) => roles.includes(t));
+  const tier = ["T1", "T2", "T3", "T4", "T5"].find((t) => roles.includes(t));
   if (!tier) throw new Error("no role");
   return { tier, name: claims.name || claims.preferred_username || "", email: String(claims.email || claims.preferred_username || claims.upn || "").toLowerCase() };
 }
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w181";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w182";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -2711,8 +2711,8 @@ async function accessTiers(env) {
   const sp = (await get(`/servicePrincipals?$filter=appId eq '${env.CLIENT_ID}'&$select=id,appRoles`)).value || [];
   if (!sp.length) throw new Error("The Reservoir enterprise app was not found in Entra.");
   const roleOf = {};
-  (sp[0].appRoles || []).forEach((r) => { if (/^T[123]$/.test(r.value || "")) roleOf[r.id] = r.value; });
-  const rank = { T1: 1, T2: 2, T3: 3 };
+  (sp[0].appRoles || []).forEach((r) => { if (/^T[1-5]$/.test(r.value || "")) roleOf[r.id] = r.value; });
+  const rank = { T1: 1, T2: 2, T3: 3, T4: 4, T5: 5 };
   const tiers = {};
   const give = (u, tier) => {
     for (const k of [u.userPrincipalName, u.mail]) {
@@ -2853,6 +2853,122 @@ const mailWhy = (r) => {
   if (r.status === 404) return "Microsoft could not find this mailbox." + code;
   return `Microsoft answered ${r.status}.` + code;
 };
+// ---- Access (T1 only). Who has which tier, changing it in Entra, and tiles switched off per person. ----
+async function accessTable(env) {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS tile_overrides (email TEXT NOT NULL, tile_id TEXT NOT NULL, by_name TEXT, at TEXT DEFAULT (datetime('now')), PRIMARY KEY (email, tile_id))").run();
+}
+async function accessGraph(env, path, init) {
+  let res = await graphFetch(env, path, init);
+  if (res.status === 403) { graphToken = { value: null, at: 0 }; res = await graphFetch(env, path, init); }
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { json = null; }
+  return { ok: res.ok, status: res.status, json, text };
+}
+async function accessRoutes(request, env, user, url) {
+  if (!url.pathname.startsWith("/api/access") && url.pathname !== "/api/mytiles") return null;
+  if (url.pathname === "/api/mytiles") {
+    if (request.method !== "GET") return reply(env, 404, { error: "not found" });
+    await accessTable(env);
+    const rows = await env.DB.prepare("SELECT tile_id FROM tile_overrides WHERE email = ?").bind(String(user.email || "").toLowerCase()).all();
+    return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), worker: WORKER_BUILD });
+  }
+  if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
+  try {
+    await accessTable(env);
+    const sp = (await accessGraph(env, `/servicePrincipals?$filter=appId eq '${env.CLIENT_ID}'&$select=id,appRoles`));
+    if (!sp.ok || !sp.json || !(sp.json.value || []).length) return reply(env, 200, { ok: false, error: `Could not read the Reservoir app in Entra (${sp.status}). ${sp.json && sp.json.error ? sp.json.error.message : ""}` });
+    const app = sp.json.value[0];
+    const roleOf = {}, idOf = {};
+    (app.appRoles || []).forEach((r) => { if (/^T[1-5]$/.test(r.value || "")) { roleOf[r.id] = r.value; idOf[r.value] = r.id; } });
+    if (url.pathname === "/api/access/people" && request.method === "GET") {
+      const people = {};
+      let next = `/servicePrincipals/${app.id}/appRoleAssignedTo?$top=100`;
+      for (let page = 0; next && page < 5; page++) {
+        const j = await accessGraph(env, next);
+        if (!j.ok) return reply(env, 200, { ok: false, error: `Entra answered ${j.status}. ${j.json && j.json.error ? j.json.error.message : j.text.slice(0, 160)}` });
+        for (const a of j.json.value || []) {
+          const tier = roleOf[a.appRoleId];
+          if (!tier) continue;
+          if (a.principalType === "User") {
+            const p = people[a.principalId] || (people[a.principalId] = { id: a.principalId, name: a.principalDisplayName || "", tier: "", direct: "", viaGroup: "" });
+            p.direct = tier;
+          } else if (a.principalType === "Group") {
+            const m = await accessGraph(env, `/groups/${a.principalId}/transitiveMembers/microsoft.graph.user?$select=id,displayName&$top=200`);
+            for (const u of (m.json && m.json.value) || []) {
+              const p = people[u.id] || (people[u.id] = { id: u.id, name: u.displayName || "", tier: "", direct: "", viaGroup: "" });
+              p.viaGroup = tier;
+            }
+          }
+        }
+        next = j.json["@odata.nextLink"] || "";
+      }
+      const rank = { T1: 1, T2: 2, T3: 3, T4: 4, T5: 5 };
+      const all = await accessGraph(env, "/users?$select=id,displayName,mail,userPrincipalName,accountEnabled&$top=200");
+      const out = [];
+      const seen = {};
+      for (const u of (all.json && all.json.value) || []) {
+        if (u.accountEnabled === false) continue;
+        const email = String(u.mail || u.userPrincipalName || "").toLowerCase();
+        const p = people[u.id];
+        const tiers = p ? [p.direct, p.viaGroup].filter(Boolean) : [];
+        const tier = tiers.sort((a, b) => rank[a] - rank[b])[0] || "";
+        seen[u.id] = 1;
+        out.push({ id: u.id, name: u.displayName || email, email, tier, direct: p ? p.direct : "", viaGroup: p ? p.viaGroup : "", me: email === String(user.email || "").toLowerCase() });
+      }
+      for (const id of Object.keys(people)) if (!seen[id]) { const p = people[id]; out.push({ id, name: p.name, email: "", tier: p.direct || p.viaGroup, direct: p.direct, viaGroup: p.viaGroup, me: false }); }
+      out.sort((a, b) => (a.tier ? 0 : 1) - (b.tier ? 0 : 1) || String(a.name).localeCompare(String(b.name)));
+      const off = await env.DB.prepare("SELECT email, COUNT(*) AS n FROM tile_overrides GROUP BY email").all();
+      const offBy = {};
+      (off.results || []).forEach((r) => { offBy[r.email] = r.n; });
+      out.forEach((p) => { p.tilesOff = offBy[p.email] || 0; });
+      return reply(env, 200, { ok: true, people: out, roles: Object.keys(idOf).sort(), worker: WORKER_BUILD });
+    }
+    if (url.pathname === "/api/access/tier" && request.method === "POST") {
+      const b = await request.json().catch(() => ({}));
+      const userId = String(b.userId || "");
+      const tier = String(b.tier || "");
+      if (!/^[0-9a-f-]{36}$/i.test(userId)) return reply(env, 400, { error: "bad person" });
+      if (tier !== "none" && !idOf[tier]) return reply(env, 200, { ok: false, error: `The role ${tier} does not exist in Entra yet.` });
+      const who = await accessGraph(env, `/users/${userId}?$select=mail,userPrincipalName`);
+      const whoEmail = String((who.json && (who.json.mail || who.json.userPrincipalName)) || "").toLowerCase();
+      if (whoEmail && whoEmail === String(user.email || "").toLowerCase()) return reply(env, 200, { ok: false, error: "You cannot change your own access here. Do that in Entra so you cannot lock yourself out." });
+      const cur = await accessGraph(env, `/users/${userId}/appRoleAssignments?$top=100`);
+      if (!cur.ok) return reply(env, 200, { ok: false, error: `Entra answered ${cur.status}. ${cur.json && cur.json.error ? cur.json.error.message : cur.text.slice(0, 160)}` });
+      const mine = ((cur.json && cur.json.value) || []).filter((a) => a.resourceId === app.id && roleOf[a.appRoleId]);
+      if (mine.length === 1 && roleOf[mine[0].appRoleId] === tier) return reply(env, 200, { ok: true, tier, unchanged: true, worker: WORKER_BUILD });
+      if (tier !== "none") {
+        const add = await accessGraph(env, `/users/${userId}/appRoleAssignments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ principalId: userId, resourceId: app.id, appRoleId: idOf[tier] }) });
+        if (!add.ok) return reply(env, 200, { ok: false, error: `Entra refused the change (${add.status}). ${add.json && add.json.error ? add.json.error.message : add.text.slice(0, 160)}` });
+      }
+      for (const a of mine) {
+        if (tier !== "none" && roleOf[a.appRoleId] === tier) continue;
+        const del = await accessGraph(env, `/users/${userId}/appRoleAssignments/${a.id}`, { method: "DELETE" });
+        if (!del.ok && del.status !== 404) return reply(env, 200, { ok: false, error: `Added the new level but could not remove the old one (${del.status}). ${del.json && del.json.error ? del.json.error.message : ""}` });
+      }
+      accessTiersCache = { at: 0, value: null };
+      return reply(env, 200, { ok: true, tier, worker: WORKER_BUILD });
+    }
+    if (url.pathname === "/api/access/tiles" && request.method === "GET") {
+      const email = String(url.searchParams.get("email") || "").toLowerCase();
+      const rows = await env.DB.prepare("SELECT tile_id FROM tile_overrides WHERE email = ?").bind(email).all();
+      return reply(env, 200, { off: (rows.results || []).map((r) => r.tile_id), worker: WORKER_BUILD });
+    }
+    if (url.pathname === "/api/access/tiles" && request.method === "POST") {
+      const b = await request.json().catch(() => ({}));
+      const email = String(b.email || "").toLowerCase();
+      if (!email || !Array.isArray(b.off)) return reply(env, 400, { error: "bad request" });
+      const ids = b.off.map((x) => String(x)).filter((x) => /^[a-z0-9:_-]{1,40}$/i.test(x)).slice(0, 80);
+      const stmts = [env.DB.prepare("DELETE FROM tile_overrides WHERE email = ?").bind(email)];
+      ids.forEach((id) => stmts.push(env.DB.prepare("INSERT INTO tile_overrides (email, tile_id, by_name) VALUES (?, ?, ?)").bind(email, id, user.name || "")));
+      await env.DB.batch(stmts);
+      return reply(env, 200, { ok: true, off: ids, worker: WORKER_BUILD });
+    }
+    return reply(env, 404, { error: "not found" });
+  } catch (e) {
+    return reply(env, 200, { ok: false, error: String(e && e.message || e).slice(0, 240) });
+  }
+}
 async function mailRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/mail")) return null;
   if (request.method !== "GET") return reply(env, 404, { error: "not found" });
@@ -4497,7 +4613,7 @@ export default {
       if (user.tier !== "T1") return reply(env, 403, { error: "forbidden" });
       let v;
       try { v = JSON.parse(decodeURIComponent(viewHeader)); } catch (e) { v = null; }
-      if (!v || !v.e || !["T1", "T2", "T3"].includes(v.t)) return reply(env, 400, { error: "bad view as" });
+      if (!v || !v.e || !["T1", "T2", "T3", "T4", "T5"].includes(v.t)) return reply(env, 400, { error: "bad view as" });
       if (request.method !== "GET") return reply(env, 403, { error: "Viewing as someone else is read only." });
       console.log("view as", user.email, "->", String(v.e).toLowerCase(), v.t);
       user = { tier: v.t, name: String(v.n || ""), email: String(v.e).toLowerCase(), viewAs: true, realUser: user };
@@ -4540,6 +4656,8 @@ export default {
         return reply(env, 200, { key: b.key, worker: WORKER_BUILD });
       }
     }
+    const accessReply = await accessRoutes(request, env, user, url);
+    if (accessReply) return accessReply;
     const mailReply = await mailRoutes(request, env, user, url);
     if (mailReply) return mailReply;
     const arofloReply = await arofloRoutes(request, env, user, url);
@@ -5808,7 +5926,7 @@ export default {
     const sm = url.pathname.match(/^\/api\/secrets(?:\/([A-Za-z0-9._-]{1,100}))?$/);
     if (sm) {
       // Company passwords and IDs. Only T1 and T2 can read or change them, and the Director ID is T1 only.
-      if (user.tier === "T3") return reply(env, 403, { error: "forbidden" });
+      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
       const skey = sm[1];
       const allowed = (k) => k !== "company.directorId" || user.tier === "T1";
       if (request.method === "GET" && !skey) {
@@ -6227,5 +6345,5 @@ export default {
   }
 };
 
-globalThis.w181_BOTTOM = "Reservoir-Worker-2026.10.28-w181";
-// Reservoir-Worker-2026.10.28-w181
+globalThis.w182_BOTTOM = "Reservoir-Worker-2026.10.28-w182";
+// Reservoir-Worker-2026.10.28-w182
