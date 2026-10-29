@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w189
-globalThis.w189_TOP = "Reservoir-Worker-2026.10.28-w189";
+// Reservoir-Worker-2026.10.28-w190
+globalThis.w190_TOP = "Reservoir-Worker-2026.10.28-w190";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w189";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w190";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3212,19 +3212,31 @@ async function arofloRoutes(request, env, user, url) {
       const mode = String(url.searchParams.get("mode") || "report");
       const pendingQ = "SELECT COUNT(*) AS n FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL";
       if (mode === "refresh") {
-        const r1 = await arofloGet(env, "/projects");
+        const pend0 = await env.DB.prepare(pendingQ).first();
+        const have = await env.DB.prepare("SELECT COUNT(*) AS n FROM aroflo_projects").first();
+        const stamp = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'aroflo.projects.refreshed'").first().catch(() => null);
+        const fresh = stamp && stamp.value && Date.now() - Number(stamp.value) < 30 * 60 * 1000;
+        if (fresh && have && have.n > 0 && !url.searchParams.get("force")) return reply(env, 200, { ok: true, cached: true, scanned: have.n, pending: pend0 ? pend0.n : 0, worker: WORKER_BUILD });
+        const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+        // AroFlo limits how fast it can be asked (429). Read gently, one page at a time, and wait and retry once if it says slow down.
+        const getSlow = async (path) => {
+          let r = await arofloGet(env, path);
+          if (r.status === 429) { await pause(2500); r = await arofloGet(env, path); }
+          return r;
+        };
+        const r1 = await getSlow("/projects");
         const l1 = r1.ok ? arofloList(r1.json) : null;
-        if (!l1) return reply(env, 200, { ok: false, error: `AroFlo answered ${r1.status} for the project list.`, worker: WORKER_BUILD });
+        if (!l1) {
+          if (have && have.n > 0) return reply(env, 200, { ok: true, throttled: r1.status === 429, scanned: have.n, pending: pend0 ? pend0.n : 0, worker: WORKER_BUILD });
+          return reply(env, 200, { ok: false, error: r1.status === 429 ? "AroFlo is limiting how fast it can be asked right now. Wait a few minutes and press Refresh." : `AroFlo answered ${r1.status} for the project list.`, worker: WORKER_BUILD });
+        }
         const last = arofloLastPage(arofloMeta(r1.json), l1.length) || 1;
-        const pages = [];
-        for (let pg = last; pg >= 1 && pages.length < 30; pg--) pages.push(pg);
-        const all = [];
-        let failed = 0;
-        for (let k = 0; k < pages.length; k += 10) {
-          const got = await Promise.all(pages.slice(k, k + 10).map(async (pg) => {
-            try { if (pg === 1) return l1; const rp = await arofloGet(env, "/projects?page=" + pg); return rp.ok ? arofloList(rp.json) || [] : (failed++, []); } catch (e) { failed++; return []; }
-          }));
-          got.forEach((g) => all.push(...g));
+        const all = [...l1];
+        let failed = 0, throttled = false, read = 1;
+        for (let pg = last; pg >= 2 && read < 30; pg--) {
+          const rp = await getSlow("/projects?page=" + pg);
+          if (rp.ok) { all.push(...(arofloList(rp.json) || [])); read++; } else { failed++; if (rp.status === 429) { throttled = true; break; } }
+          await pause(150);
         }
         const stmts = [];
         for (const rec of all) {
@@ -3234,16 +3246,19 @@ async function arofloRoutes(request, env, user, url) {
           stmts.push(env.DB.prepare("INSERT INTO aroflo_projects (id, number, name, client, status, suburb, seen) VALUES (?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(id) DO UPDATE SET number = excluded.number, name = excluded.name, client = excluded.client, status = excluded.status, seen = excluded.seen").bind(id, String(rec.projectNumber ?? rec.referenceNumber ?? ""), String(rec.name || ""), String((rec.client && rec.client.name) || ""), String(rec.status || ""), loc && loc.suburb ? String(loc.suburb) : null));
         }
         for (let k = 0; k < stmts.length; k += 90) await env.DB.batch(stmts.slice(k, k + 90));
+        if (!throttled && !failed) await env.DB.prepare("INSERT INTO app_settings (key, value, by_name, at) VALUES ('aroflo.projects.refreshed', ?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at").bind(String(Date.now()), user.name || "").run().catch(() => {});
         const pend = await env.DB.prepare(pendingQ).first();
-        return reply(env, 200, { ok: true, scanned: all.length, pagesRead: pages.length, lastPage: last, partial: last > pages.length, failedPages: failed, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
+        return reply(env, 200, { ok: true, scanned: all.length, pagesRead: read, lastPage: last, failedPages: failed, throttled, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
       }
       if (mode === "detail") {
         const rows = (await env.DB.prepare("SELECT id FROM aroflo_projects WHERE UPPER(status) = 'OPEN' AND suburb IS NULL LIMIT 40").all()).results || [];
         let done = 0, failed = 0;
-        for (let k = 0; k < rows.length; k += 10) {
-          await Promise.all(rows.slice(k, k + 10).map(async (row) => {
+        let limited = false;
+        for (let k = 0; k < rows.length && !limited; k += 4) {
+          await Promise.all(rows.slice(k, k + 4).map(async (row) => {
             try {
               const rd = await arofloGet(env, "/projects/" + encodeURIComponent(row.id));
+              if (rd.status === 429) { limited = true; return; }
               if (!rd.ok || !rd.json) { failed++; return; }
               const loc = rd.json.location || {};
               const extra = arofloFlat(rd.json, "", [], 0).filter(([k2, v]) => v !== "" && /consent|heps|custom/i.test(k2 + " " + v)).slice(0, 12).map(([k2, v]) => `${k2.split(".").slice(-2).join(".")}=${String(v).slice(0, 40)}`).join(" | ");
@@ -3251,9 +3266,10 @@ async function arofloRoutes(request, env, user, url) {
               done++;
             } catch (e) { failed++; }
           }));
+          await new Promise((r) => setTimeout(r, 250));
         }
         const pend = await env.DB.prepare(pendingQ).first();
-        return reply(env, 200, { ok: true, done, failed, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
+        return reply(env, 200, { ok: true, done, failed, limited, pending: pend ? pend.n : 0, worker: WORKER_BUILD });
       }
       const wanted = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
       if (!wanted.length) return reply(env, 400, { error: "no suburbs" });
@@ -6458,5 +6474,5 @@ export default {
   }
 };
 
-globalThis.w189_BOTTOM = "Reservoir-Worker-2026.10.28-w189";
-// Reservoir-Worker-2026.10.28-w189
+globalThis.w190_BOTTOM = "Reservoir-Worker-2026.10.28-w190";
+// Reservoir-Worker-2026.10.28-w190
