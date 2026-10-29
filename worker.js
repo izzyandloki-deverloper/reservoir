@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w183
-globalThis.w183_TOP = "Reservoir-Worker-2026.10.28-w183";
+// Reservoir-Worker-2026.10.28-w184
+globalThis.w184_TOP = "Reservoir-Worker-2026.10.28-w184";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w183";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w184";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3206,6 +3206,41 @@ async function arofloRoutes(request, env, user, url) {
       return reply(env, 200, { ok: r.ok, status: r.status, path, contentType: r.contentType, body: shown, worker: WORKER_BUILD });
     }
     // The 10 newest projects. Asks AroFlo for the project list, keeps the newest 10 (by a created or added date when the records have one, otherwise by the highest id), and shapes each for the card.
+    // Active projects in chosen suburbs (recycled water areas). Reads AroFlo's project pages newest first, up to 40 pages in one go, and matches the suburb names anywhere in the project's own address fields.
+    if (url.pathname === "/api/aroflo/suburbs") {
+      const wanted = String(url.searchParams.get("s") || "").split("|").map((x) => x.trim().toLowerCase()).filter(Boolean).slice(0, 12);
+      if (!wanted.length) return reply(env, 400, { error: "no suburbs" });
+      const r1 = await arofloGet(env, "/projects");
+      const l1 = r1.ok ? arofloList(r1.json) : null;
+      if (!l1) return reply(env, 200, { ok: false, error: `AroFlo answered ${r1.status} for the project list.`, worker: WORKER_BUILD });
+      const last = arofloLastPage(arofloMeta(r1.json), l1.length) || 1;
+      const pages = [];
+      for (let pg = last; pg >= 1 && pages.length < 40; pg--) pages.push(pg);
+      const all = [];
+      let failed = 0;
+      for (let i = 0; i < pages.length; i += 10) {
+        const got = await Promise.all(pages.slice(i, i + 10).map(async (pg) => {
+          try { if (pg === 1) return l1; const rp = await arofloGet(env, "/projects?page=" + pg); return rp.ok ? arofloList(rp.json) || [] : (failed++, []); } catch (e) { failed++; return []; }
+        }));
+        got.forEach((g) => all.push(...g));
+      }
+      const statusCount = {};
+      const items = [];
+      for (const rec of all) {
+        const flat = arofloFlat(rec, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)");
+        const st = (flat.find(([k]) => /(^|\.)(status|state|stage|projectstatus)$/i.test(k)) || [])[1] || "";
+        statusCount[st || "(none)"] = (statusCount[st || "(none)"] || 0) + 1;
+        const addrVals = flat.filter(([k]) => /address|street|suburb|city|town|location|site/i.test(k) && !/email|url/i.test(k)).map(([, v]) => String(v));
+        const hay = addrVals.join(" | ").toLowerCase();
+        const hit = wanted.find((w) => new RegExp("(^|[^a-z])" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^a-z]|$)").test(hay));
+        if (!hit) continue;
+        const sh = arofloShape(rec);
+        items.push({ suburb: hit, number: sh.number, client: sh.client, address: Array.from(new Set(addrVals)).slice(0, 4).join(", "), status: st, id: String((rec && (rec.id ?? rec.projectId ?? rec.ID)) ?? "") });
+      }
+      const dead = /(complete|closed|cancel|invoice|archiv|finish|done|lost|declin)/i;
+      const active = items.filter((x) => !dead.test(x.status));
+      return reply(env, 200, { ok: true, scanned: all.length, pagesRead: pages.length, lastPage: last, failedPages: failed, partial: last > pages.length, statuses: statusCount, found: items.length, items: active, worker: WORKER_BUILD });
+    }
     if (url.pathname === "/api/aroflo/projects") {
       const r = await arofloGet(env, "/projects");
       let list = r.ok ? arofloList(r.json) : null;
@@ -6386,5 +6421,5 @@ export default {
   }
 };
 
-globalThis.w183_BOTTOM = "Reservoir-Worker-2026.10.28-w183";
-// Reservoir-Worker-2026.10.28-w183
+globalThis.w184_BOTTOM = "Reservoir-Worker-2026.10.28-w184";
+// Reservoir-Worker-2026.10.28-w184
