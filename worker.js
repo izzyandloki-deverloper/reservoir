@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w186
-globalThis.w186_TOP = "Reservoir-Worker-2026.10.28-w186";
+// Reservoir-Worker-2026.10.28-w187
+globalThis.w187_TOP = "Reservoir-Worker-2026.10.28-w187";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w186";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w187";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3250,7 +3250,12 @@ async function arofloRoutes(request, env, user, url) {
         const pid = first && (first.id ?? first.projectId ?? first.ID);
         if (pid !== undefined) {
           const rd = await arofloGet(env, "/projects/" + encodeURIComponent(String(pid)));
-          if (rd.json) samples.unshift("FULL PROJECT " + arofloFlat(rd.json, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)").slice(0, 140).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(" | "));
+          if (rd.json) {
+            const fl = arofloFlat(rd.json, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)");
+            const pick = fl.filter(([k, v]) => /suburb|consent|heps|custom|address|locat|site|street|city|town|postcode/i.test(k + " " + v)).slice(0, 25);
+            samples.length = 0;
+            samples.push(`Project has ${fl.length} filled fields. Likely ones: ` + pick.map(([k, v]) => `${k.split(".").slice(-3).join(".")}=${String(v).slice(0, 30)}`).join(", "));
+          }
         }
       } catch (e) { /* the sample is a bonus */ }
       const dead = /(complete|closed|cancel|invoice|archiv|finish|done|lost|declin)/i;
@@ -6437,5 +6442,5 @@ export default {
   }
 };
 
-globalThis.w186_BOTTOM = "Reservoir-Worker-2026.10.28-w186";
-// Reservoir-Worker-2026.10.28-w186
+globalThis.w187_BOTTOM = "Reservoir-Worker-2026.10.28-w187";
+// Reservoir-Worker-2026.10.28-w187
