@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w185
-globalThis.w185_TOP = "Reservoir-Worker-2026.10.28-w185";
+// Reservoir-Worker-2026.10.28-w186
+globalThis.w186_TOP = "Reservoir-Worker-2026.10.28-w186";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w185";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w186";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3244,6 +3244,15 @@ async function arofloRoutes(request, env, user, url) {
         const sh = arofloShape(rec);
         items.push({ suburb: hit, number: sh.number, client: sh.client, address: Array.from(new Set(addrVals)).slice(0, 4).join(", ") || hitKey, status: st, matchedOn: hitKey, id: String((rec && (rec.id ?? rec.projectId ?? rec.ID)) ?? "") });
       }
+      // One open project read in full, so the field names for suburb, consent number and HEPS number can be seen.
+      try {
+        const first = all.find((x) => /open/i.test(String((arofloFlat(x, "", [], 0).find(([k]) => /(^|\.)(status|state|stage)$/i.test(k)) || [])[1] || "")));
+        const pid = first && (first.id ?? first.projectId ?? first.ID);
+        if (pid !== undefined) {
+          const rd = await arofloGet(env, "/projects/" + encodeURIComponent(String(pid)));
+          if (rd.json) samples.unshift("FULL PROJECT " + arofloFlat(rd.json, "", [], 0).filter(([, v]) => v !== "" && v !== "(empty list)").slice(0, 140).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`).join(" | "));
+        }
+      } catch (e) { /* the sample is a bonus */ }
       const dead = /(complete|closed|cancel|invoice|archiv|finish|done|lost|declin)/i;
       const active = items.filter((x) => !dead.test(x.status));
       return reply(env, 200, { ok: true, scanned: all.length, pagesRead: pages.length, lastPage: last, failedPages: failed, partial: last > pages.length, statuses: statusCount, samples, found: items.length, items: active, worker: WORKER_BUILD });
@@ -6428,5 +6437,5 @@ export default {
   }
 };
 
-globalThis.w185_BOTTOM = "Reservoir-Worker-2026.10.28-w185";
-// Reservoir-Worker-2026.10.28-w185
+globalThis.w186_BOTTOM = "Reservoir-Worker-2026.10.28-w186";
+// Reservoir-Worker-2026.10.28-w186
