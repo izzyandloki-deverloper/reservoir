@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w194
-globalThis.w194_TOP = "Reservoir-Worker-2026.10.28-w194";
+// Reservoir-Worker-2026.10.28-w196
+globalThis.w196_TOP = "Reservoir-Worker-2026.10.28-w196";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -205,7 +205,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w194";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w196";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -3003,6 +3003,29 @@ async function accessRoutes(request, env, user, url) {
     return reply(env, 200, { ok: false, error: String(e && e.message || e).slice(0, 240) });
   }
 }
+// ---- Budget. The expense list, what is ticked paid this month and the weekly transfer, kept in one settings row so it survives reloads and is the same on every device. T1 and T2 only. ----
+async function budgetRoutes(request, env, user, url) {
+  if (url.pathname !== "/api/budget") return null;
+  if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+  await settingsTable(env);
+  if (request.method === "GET") {
+    const row = await env.DB.prepare("SELECT value, by_name, at FROM app_settings WHERE key = 'budget.state'").first();
+    let state = null;
+    try { state = row && row.value ? JSON.parse(row.value) : null; } catch (e) { state = null; }
+    return reply(env, 200, { state, by: row ? row.by_name : "", at: row ? row.at : "", worker: WORKER_BUILD });
+  }
+  if (request.method === "PUT") {
+    const raw = await request.text();
+    if (raw.length > 120000) return reply(env, 400, { error: "too big" });
+    let b;
+    try { b = JSON.parse(raw); } catch (e) { return reply(env, 400, { error: "bad json" }); }
+    if (!b || !Array.isArray(b.expenses)) return reply(env, 400, { error: "bad state" });
+    const state = { expenses: b.expenses.slice(0, 200), paid: b.paid && typeof b.paid === "object" ? b.paid : {}, amounts: b.amounts && typeof b.amounts === "object" ? b.amounts : {}, settings: b.settings && typeof b.settings === "object" ? b.settings : {}, month: String(b.month || "").slice(0, 7) };
+    await env.DB.prepare("INSERT INTO app_settings (key, value, by_name, at) VALUES ('budget.state', ?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, by_name = excluded.by_name, at = excluded.at").bind(JSON.stringify(state), user.name || "").run();
+    return reply(env, 200, { ok: true, worker: WORKER_BUILD });
+  }
+  return reply(env, 404, { error: "not found" });
+}
 async function mailRoutes(request, env, user, url) {
   if (!url.pathname.startsWith("/api/mail")) return null;
   if (request.method !== "GET") return reply(env, 404, { error: "not found" });
@@ -4822,6 +4845,8 @@ export default {
     }
     const accessReply = await accessRoutes(request, env, user, url);
     if (accessReply) return accessReply;
+    const budgetReply = await budgetRoutes(request, env, user, url);
+    if (budgetReply) return budgetReply;
     const mailReply = await mailRoutes(request, env, user, url);
     if (mailReply) return mailReply;
     const arofloReply = await arofloRoutes(request, env, user, url);
@@ -6509,5 +6534,5 @@ export default {
   }
 };
 
-globalThis.w194_BOTTOM = "Reservoir-Worker-2026.10.28-w194";
-// Reservoir-Worker-2026.10.28-w194
+globalThis.w196_BOTTOM = "Reservoir-Worker-2026.10.28-w196";
+// Reservoir-Worker-2026.10.28-w196
