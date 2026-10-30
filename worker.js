@@ -225,7 +225,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.31-w199";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.31-w200";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -363,6 +363,13 @@ function fullNameOf(name, middle) {
   if (!n || !m) return n;
   const i = n.indexOf(" ");
   return i < 0 ? `${n} ${m}` : `${n.slice(0, i)} ${m} ${n.slice(i + 1)}`;
+}
+// The one style for a team name in any list: preferred name (or first name when there is none), then the surname. Zac Rochow-O'Toole, Mitch Saba, Tyler Willey.
+function teamName(r) {
+  const parts = String(r && r.name || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  if (!parts.length) return "";
+  const first = String(r && r.preferred_name || "").trim() || parts[0];
+  return [first, ...parts.slice(1)].join(" ");
 }
 // A dfp_xero row with the person's own DFP details (preferred name, time of birth, emergency contact) from dfp_reservoir, joined on work email.
 const PERSON_SQL = "SELECT x.*, r.preferred_name, r.birth_time, r.em_name, r.em_relationship, r.em_mobile, r.em_email, r.em_saved_at FROM dfp_xero x LEFT JOIN dfp_reservoir r ON lower(r.email) = lower(x.email)";
@@ -2948,7 +2955,7 @@ async function accessRoutes(request, env, user, url) {
       let nameBy = {};
       try {
         const rows = await env.DB.prepare(PERSON_SQL).all();
-        (rows.results || []).forEach((r) => { const e = String(r.email || "").toLowerCase(); const n = String(r.preferred_name || "").trim() || String(r.name || "").trim(); if (e && n) nameBy[e] = n; });
+        (rows.results || []).forEach((r) => { const e = String(r.email || "").toLowerCase(); const n = teamName(r); if (e && n) nameBy[e] = n; });
       } catch (e) { nameBy = {}; }
       const centralBoxes = new Set(MAILBOXES.filter((b) => b.id !== "tayler").map((b) => mailAddress(env, b)));
       for (const u of (all.json && all.json.value) || []) {
