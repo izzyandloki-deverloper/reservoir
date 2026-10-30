@@ -1,5 +1,5 @@
-// Reservoir-Worker-2026.10.28-w196
-globalThis.w196_TOP = "Reservoir-Worker-2026.10.28-w196";
+// Reservoir-Worker-2026.10.28-w197
+globalThis.w197_TOP = "Reservoir-Worker-2026.10.28-w197";
 // Reservoir API Worker. Validates the Microsoft Entra token on every request, then reads and writes the D1 fleet table.
 const FIELDS = ["name","rego","expiry","serial","make","model","colour","year","body","vin","engine","compliance","fuel","driver","garaged","finance","directDebit","contract","lastService","nextService","serviceProvider","servicePhone","serviceEmail","serviceBooking","financeExpiry","financeDocs"];
 
@@ -193,6 +193,26 @@ async function sendToXero(env, user, meta) {
   }
 }
 
+async function mailAttachment(env, user, to, name, mime, b64) {
+  const sender = env.MAIL_SENDER || MAIL_SENDER_DEFAULT;
+  const payload = JSON.stringify({
+    message: {
+      subject: name,
+      body: { contentType: "Text", content: `Sent from Reservoir by ${user.name}.` },
+      toRecipients: [{ emailAddress: { address: to } }],
+      attachments: [{ "@odata.type": "#microsoft.graph.fileAttachment", name, contentType: mime, contentBytes: b64 }]
+    },
+    saveToSentItems: true
+  });
+  const post = () => graphFetch(env, `/users/${encodeURIComponent(sender)}/sendMail`, { method: "POST", headers: { "Content-Type": "application/json" }, body: payload });
+  let res = await post();
+  if (res.status === 403 || res.status === 401) {
+    graphToken = { at: 0, value: "" };
+    res = await post();
+  }
+  if (!res.ok) throw new Error(`sendMail ${res.status}`);
+}
+
 let receiptRecordsReady = false;
 async function receiptRecordsTable(env) {
   if (receiptRecordsReady) return;
@@ -205,7 +225,7 @@ async function logUpdate(env, user, vehicleId, label, summary, detail) {
   await env.DB.prepare("INSERT INTO t2_updates (user_name, tier, vehicle_id, vehicle_label, summary, detail) VALUES (?, ?, ?, ?, ?, ?)").bind(user.name, user.tier, vehicleId, String(label || "").slice(0, 100), String(summary).slice(0, 200), JSON.stringify(detail || {}).slice(0, 4000)).run();
 }
 
-const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w196";
+const WORKER_BUILD = "Reservoir-Worker-2026.10.28-w197";
 // ---- Xero connection (OAuth2 web app). Secrets: XERO_CLIENT_SECRET. Optional vars: XERO_CLIENT_ID, XERO_REDIRECT, XERO_SCOPES ----
 const XERO_CLIENT_ID_DEFAULT = "6387204C4C394207A0C825A12FB86975";
 const XERO_REDIRECT_DEFAULT = "https://reservoir-api.izzyandloki.workers.dev/api/xero/callback";
@@ -6284,6 +6304,25 @@ export default {
       }
     }
 
+    const inv = url.pathname.match(/^\/api\/invoices\/(xero|aroflo)$/);
+    if (inv && request.method === "POST") {
+      // Invoices dropped on the desktop screen go out as one email each, so the destination inbox makes one draft per file.
+      if (user.tier !== "T1" && user.tier !== "T2") return reply(env, 403, { error: "forbidden" });
+      const varName = inv[1] === "xero" ? "XERO_BILLS_EMAIL" : "AROFLO_BILLS_EMAIL";
+      const to = env[varName];
+      if (!to) return reply(env, 501, { error: "not set", detail: `${varName} is not set on the Worker` });
+      try {
+        const body = await request.json();
+        const list = Array.isArray(body && body.files) ? body.files : [];
+        if (!list.length || list.length > 10) return reply(env, 400, { error: "bad request", detail: "1 to 10 files" });
+        for (const f of list) if (!f || !f.data || Math.floor(String(f.data).length * 0.75) > MAX_EMAIL) return reply(env, 413, { error: "too large", detail: `${(f && f.name) || "file"} is over 3.5 MB` });
+        for (const f of list) await mailAttachment(env, user, to, String(f.name || "invoice.pdf").slice(0, 150), String(f.type || "application/pdf"), String(f.data));
+        return reply(env, 200, { ok: true, sent: list.length });
+      } catch (e) {
+        return reply(env, 502, { error: "send failed", detail: String(e.message || "").slice(0, 200) });
+      }
+    }
+
     const xm = url.pathname.match(/^\/api\/(?:docs|receipts)\/([A-Za-z0-9!_-]{1,200})\/xero$/);
     if (xm && request.method === "POST") {
       // Email a stored PDF to the Xero bills inbox. Reimbursements can only be released by T1.
@@ -6534,5 +6573,5 @@ export default {
   }
 };
 
-globalThis.w196_BOTTOM = "Reservoir-Worker-2026.10.28-w196";
-// Reservoir-Worker-2026.10.28-w196
+globalThis.w197_BOTTOM = "Reservoir-Worker-2026.10.28-w197";
+// Reservoir-Worker-2026.10.28-w197
